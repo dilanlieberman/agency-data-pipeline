@@ -3,6 +3,10 @@ const path = require('path');
 
 // Team location mapping
 const SETTERS = {
+  dilan: {
+    locationIds: ['QOb4tW3N9V0i97IHdaol', 'IpuSv4jgeeoI0hS1Ib7e'],
+    name: 'dilan sub acc 1 + 2',
+  },
   cesar: {
     locationId: 'waStZftBf5D40prioYoj',
     name: 'cesar sub acc 1',
