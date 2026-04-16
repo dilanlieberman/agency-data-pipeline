@@ -1,4 +1,33 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
+const fs = require('fs');
+const path = require('path');
+
+const LOCK_FILE = path.join(__dirname, '.sync.lock');
+const ACCOUNT_TIMEOUT_MS = 60_000; // 60s max per account
+
+// Process lock — prevent cron pileup
+function acquireLock() {
+  try {
+    if (fs.existsSync(LOCK_FILE)) {
+      const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8'));
+      try { process.kill(pid, 0); return false; } // process alive → skip
+      catch (e) { /* stale lock */ }
+    }
+    fs.writeFileSync(LOCK_FILE, String(process.pid));
+    return true;
+  } catch (e) { return false; }
+}
+
+function releaseLock() {
+  try { fs.unlinkSync(LOCK_FILE); } catch (e) { /* ok */ }
+}
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
+  ]);
+}
 
 const { createGhlClient } = require('./lib/ghl-client');
 const {
@@ -101,7 +130,7 @@ async function runSync() {
   const setterRows = [];
   for (const [name, { locationId }] of Object.entries(SETTERS)) {
     try {
-      const row = await syncSetter(name, locationId);
+      const row = await withTimeout(syncSetter(name, locationId), ACCOUNT_TIMEOUT_MS, name);
       setterRows.push(row);
       console.log(`[tracker] ${name}: ${row.closed_trial + row.closed_ppa} closes, ${row.close_rate}% rate`);
     } catch (err) {
@@ -111,7 +140,7 @@ async function runSync() {
 
   let closerRow = null;
   try {
-    closerRow = await syncCloser();
+    closerRow = await withTimeout(syncCloser(), ACCOUNT_TIMEOUT_MS, 'tony');
     console.log(`[tracker] tony: ${closerRow.retainer_closes + closerRow.trial_closes} closes`);
   } catch (err) {
     console.error(`[tracker] tony sync failed: ${err.message}`);
@@ -133,6 +162,14 @@ async function runSync() {
 }
 
 if (require.main === module) {
+  if (!acquireLock()) {
+    console.log('[tracker] another sync is running — skipping');
+    process.exit(0);
+  }
+  process.on('exit', releaseLock);
+  process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+  process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+
   const args = process.argv.slice(2);
 
   if (args.includes('--cron')) {
@@ -143,10 +180,13 @@ if (require.main === module) {
     });
     runSync().catch(err => console.error('[tracker] initial sync failed:', err.message));
   } else {
-    runSync().catch(err => {
-      console.error('[tracker] fatal:', err.message);
-      process.exit(1);
-    });
+    runSync()
+      .then(() => { releaseLock(); process.exit(0); })
+      .catch(err => {
+        console.error('[tracker] fatal:', err.message);
+        releaseLock();
+        process.exit(1);
+      });
   }
 }
 

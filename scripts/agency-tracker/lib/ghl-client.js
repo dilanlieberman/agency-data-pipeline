@@ -73,12 +73,14 @@ function createGhlClient(token) {
     return res.data.pipelines ?? [];
   }
 
-  async function getOpportunities(locationId, pipelineId) {
+  async function getOpportunities(locationId, pipelineId, query = {}) {
     // Opportunities search uses pipeline_id (snake_case) and startAfter cursor, not skip
     const all = [];
     let startAfter;
-    while (true) {
-      const params = { location_id: locationId, pipeline_id: pipelineId, limit: PAGE_SIZE };
+    const MAX_PAGES = 50; // Safety cap — don't paginate forever
+    let pages = 0;
+    while (pages < MAX_PAGES) {
+      const params = { location_id: locationId, pipeline_id: pipelineId, limit: PAGE_SIZE, ...query };
       if (startAfter) params.startAfter = startAfter;
       const res = await withRetry(() =>
         axios.get(`${GHL_BASE}/opportunities/search`, { headers, params })
@@ -88,6 +90,7 @@ function createGhlClient(token) {
       all.push(...page);
       if (page.length < PAGE_SIZE) break;
       startAfter = page[page.length - 1].id;
+      pages++;
       await sleep(RATE_DELAY_MS);
     }
     return all;
