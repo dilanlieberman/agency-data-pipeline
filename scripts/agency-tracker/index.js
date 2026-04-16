@@ -1,0 +1,153 @@
+require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
+
+const { createGhlClient } = require('./lib/ghl-client');
+const {
+  computeSetterMetrics,
+  computeCloserMetrics,
+  computePpaClientMetrics,
+  computeLeadBankRunway,
+  computeAgencySnapshot,
+} = require('./lib/metrics');
+const {
+  upsertSetterDaily,
+  upsertCloserDaily,
+  upsertPpaClientDaily,
+  upsertAgencyDaily,
+  insertAlert,
+} = require('./lib/supabase-client');
+const { checkAlerts } = require('./lib/alerts');
+const { SETTERS, CLOSER, getToken } = require('./lib/config');
+
+const LEAD_BANK_TOTAL = 400_000;
+const DAILY_BURN = 4500;
+
+function today() {
+  return new Date().toISOString().split('T')[0];
+}
+
+async function buildStageMap(client, locationId) {
+  const pipelines = await client.getPipelines(locationId);
+  const map = {};
+  for (const pipeline of pipelines) {
+    for (const stage of (pipeline.stages || [])) {
+      map[stage.id] = stage.name;
+    }
+  }
+  return map;
+}
+
+async function syncSetter(name, locationId) {
+  const token = getToken(locationId);
+  const client = createGhlClient(token);
+  const stageMap = await buildStageMap(client, locationId);
+  const pipelines = await client.getPipelines(locationId);
+
+  let allOpps = [];
+  for (const pipeline of pipelines) {
+    const opps = await client.getOpportunities(locationId, pipeline.id);
+    allOpps.push(...opps);
+  }
+
+  const todayOpps = allOpps.filter(o => {
+    const created = o.createdAt || o.dateAdded || '';
+    return created.startsWith(today());
+  });
+
+  const metrics = computeSetterMetrics(todayOpps, stageMap);
+
+  const row = {
+    setter_name: name,
+    location_id: locationId,
+    date: today(),
+    ...metrics,
+  };
+
+  await upsertSetterDaily(row);
+  return row;
+}
+
+async function syncCloser() {
+  const { tony } = CLOSER;
+  const token = getToken(tony.paidAdsLocationId);
+  const client = createGhlClient(token);
+  const stageMap = await buildStageMap(client, tony.paidAdsLocationId);
+  const pipelines = await client.getPipelines(tony.paidAdsLocationId);
+
+  let allOpps = [];
+  for (const pipeline of pipelines) {
+    const opps = await client.getOpportunities(tony.paidAdsLocationId, pipeline.id);
+    allOpps.push(...opps);
+  }
+
+  const todayOpps = allOpps.filter(o => {
+    const created = o.createdAt || o.dateAdded || '';
+    return created.startsWith(today());
+  });
+
+  const metrics = computeCloserMetrics(todayOpps, stageMap);
+
+  const row = {
+    date: today(),
+    ...metrics,
+  };
+
+  await upsertCloserDaily(row);
+  return row;
+}
+
+async function runSync() {
+  console.log(`[tracker] sync started at ${new Date().toISOString()}`);
+
+  const setterRows = [];
+  for (const [name, { locationId }] of Object.entries(SETTERS)) {
+    try {
+      const row = await syncSetter(name, locationId);
+      setterRows.push(row);
+      console.log(`[tracker] ${name}: ${row.closed_trial + row.closed_ppa} closes, ${row.close_rate}% rate`);
+    } catch (err) {
+      console.error(`[tracker] ${name} sync failed: ${err.message}`);
+    }
+  }
+
+  let closerRow = null;
+  try {
+    closerRow = await syncCloser();
+    console.log(`[tracker] tony: ${closerRow.retainer_closes + closerRow.trial_closes} closes`);
+  } catch (err) {
+    console.error(`[tracker] tony sync failed: ${err.message}`);
+  }
+
+  const leadBank = computeLeadBankRunway(LEAD_BANK_TOTAL, DAILY_BURN);
+
+  const snapshot = computeAgencySnapshot(setterRows, closerRow, [], [], [], leadBank);
+  await upsertAgencyDaily(snapshot);
+  console.log(`[tracker] agency snapshot: ${snapshot.total_closes} closes, $${snapshot.total_ppa_revenue} PPA, $${snapshot.total_retainer_mrr} MRR`);
+
+  const alerts = checkAlerts({ ppaClients: [], setterRows, closerRow, leadBank });
+  for (const alert of alerts) {
+    await insertAlert(alert);
+    console.log(`[tracker] ALERT [${alert.severity}]: ${alert.message}`);
+  }
+
+  console.log(`[tracker] sync complete. ${alerts.length} alerts.`);
+}
+
+if (require.main === module) {
+  const args = process.argv.slice(2);
+
+  if (args.includes('--cron')) {
+    const cron = require('node-cron');
+    console.log('[tracker] starting cron — runs hourly at :00');
+    cron.schedule('0 * * * *', () => {
+      runSync().catch(err => console.error('[tracker] cron cycle failed:', err.message));
+    });
+    runSync().catch(err => console.error('[tracker] initial sync failed:', err.message));
+  } else {
+    runSync().catch(err => {
+      console.error('[tracker] fatal:', err.message);
+      process.exit(1);
+    });
+  }
+}
+
+module.exports = { runSync };
