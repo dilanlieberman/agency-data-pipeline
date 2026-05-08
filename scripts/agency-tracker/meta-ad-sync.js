@@ -81,7 +81,10 @@ async function pullAds(account, datePreset) {
     date_preset: datePreset,
     fields:
       'ad_id,ad_name,campaign_name,adset_name,spend,impressions,reach,frequency,cpm,' +
-      'unique_clicks,unique_ctr,inline_link_clicks,inline_link_click_ctr,' +
+      // Use unique_inline_link_clicks (link only), NOT unique_clicks (any click).
+      // Meta UI's "Unique CTR (link click-through rate)" is unique_inline_link_click_ctr.
+      'unique_inline_link_clicks,unique_inline_link_click_ctr,' +
+      'cost_per_unique_inline_link_click,inline_link_clicks,inline_link_click_ctr,' +
       'cost_per_inline_link_click,actions,cost_per_action_type',
     limit: 500,
     filtering: JSON.stringify([
@@ -96,8 +99,12 @@ function buildRow(account, datePreset, ad) {
   const impressions = Number(ad.impressions || 0);
   const reach = Number(ad.reach || 0);
   const cpm = Number(ad.cpm || 0);
-  const uniqueClicks = Number(ad.unique_clicks || 0);
-  const uniqueCtr = Number(ad.unique_ctr || 0);
+  // unique LINK clicks (clicks to landing page), NOT unique_clicks (any click).
+  const uniqueLinkClicks = Number(ad.unique_inline_link_clicks || 0);
+  const uniqueLinkCtr = Number(ad.unique_inline_link_click_ctr || 0);
+  const costPerUniqueLink = ad.cost_per_unique_inline_link_click
+    ? Number(ad.cost_per_unique_inline_link_click)
+    : null;
   const inlineLinkClicks = Number(ad.inline_link_clicks || 0);
   const actions = ad.actions || [];
 
@@ -107,7 +114,6 @@ function buildRow(account, datePreset, ad) {
     sumActions(actions, new Set(['omni_landing_page_view']));
 
   const cpl = leads > 0 ? +(spend / leads).toFixed(2) : null;
-  const cpuc = uniqueClicks > 0 ? +(spend / uniqueClicks).toFixed(2) : null;
   const lpvToLead = leads > 0 && lpv > 0 ? +(lpv / leads).toFixed(2) : null;
   const impToLead = leads > 0 ? Math.round(impressions / leads) : null;
 
@@ -127,10 +133,12 @@ function buildRow(account, datePreset, ad) {
     reach,
     frequency: Number(ad.frequency || 0) || null,
     cpm: +cpm.toFixed(2),
-    unique_clicks: uniqueClicks,
-    unique_ctr: +uniqueCtr.toFixed(2),
+    // schema columns named "unique_clicks" / "unique_ctr" / "cost_per_unique_click"
+    // for backwards-compat, but they now hold unique LINK metrics (matches Meta UI).
+    unique_clicks: uniqueLinkClicks,
+    unique_ctr: +uniqueLinkCtr.toFixed(2),
     inline_link_clicks: inlineLinkClicks,
-    cost_per_unique_click: cpuc,
+    cost_per_unique_click: costPerUniqueLink ? +costPerUniqueLink.toFixed(2) : null,
     leads,
     cpl,
     landing_page_views: lpv,
