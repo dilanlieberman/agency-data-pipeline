@@ -50,6 +50,69 @@ const { SETTERS, CLOSER, getToken } = require('./lib/config');
 const LEAD_BANK_TOTAL = 400_000;
 const DAILY_BURN = 4500;
 
+const VAULT_PINNACLE = '/home/claude/lifeos/vault/Pillars/Pinnacle/_index.md';
+
+function updateVaultPinnacle(snapshot, setterRows, closerRow) {
+  if (!fs.existsSync(VAULT_PINNACLE)) {
+    console.log('[tracker] vault pinnacle file not found — skipping');
+    return;
+  }
+
+  let content = fs.readFileSync(VAULT_PINNACLE, 'utf8');
+  const dateStr = today();
+  const timestamp = new Date().toISOString().slice(11, 16);
+
+  // Update frontmatter fields
+  if (content.includes('last_touched:')) {
+    content = content.replace(/last_touched:\s*\d{4}-\d{2}-\d{2}/, `last_touched: ${dateStr}`);
+  }
+
+  // Add or update current_mrr in frontmatter
+  const mrr = snapshot.total_retainer_mrr || 0;
+  const activeClients = snapshot.total_closes || 0;
+
+  if (content.includes('current_mrr:')) {
+    content = content.replace(/current_mrr:.*/, `current_mrr: ${mrr}`);
+  } else {
+    content = content.replace(/^(---\n)/, `$1current_mrr: ${mrr}\n`);
+  }
+
+  if (content.includes('active_clients:')) {
+    content = content.replace(/active_clients:.*/, `active_clients: ${activeClients}`);
+  } else {
+    content = content.replace(/^(---\n)/, `$1active_clients: ${activeClients}\n`);
+  }
+
+  if (content.includes('last_tracker_update:')) {
+    content = content.replace(/last_tracker_update:.*/, `last_tracker_update: ${dateStr}T${timestamp}`);
+  } else {
+    content = content.replace(/^(---\n)/, `$1last_tracker_update: ${dateStr}T${timestamp}\n`);
+  }
+
+  // Add tracker log section if missing
+  if (!content.includes('## Tracker Log')) {
+    content += '\n\n## Tracker Log\n';
+  }
+
+  // Build setter summary
+  const setterSummary = setterRows.map(r =>
+    `${r.setter_name}: ${r.closed_trial + r.closed_ppa} closes (${r.close_rate}%)`
+  ).join(', ');
+
+  const closerSummary = closerRow
+    ? `Tony: ${closerRow.retainer_closes + closerRow.trial_closes} closes`
+    : 'Tony: no data';
+
+  const logLine = `- **${dateStr} ${timestamp}** — MRR: $${mrr} | Closes: ${snapshot.total_closes} | PPA: $${snapshot.total_ppa_revenue} | ${setterSummary} | ${closerSummary} | Alerts: ${snapshot.alerts || 0}\n`;
+
+  content += logLine;
+
+  fs.writeFileSync(VAULT_PINNACLE, content, 'utf8');
+  // Restore claude ownership — tracker runs as root but vault is claude-owned
+  try { require('child_process').execSync(`chown claude:claude "${VAULT_PINNACLE}"`); } catch (e) {}
+  console.log(`[tracker] vault updated: MRR=$${mrr}, clients=${activeClients}`);
+}
+
 function today() {
   return new Date().toISOString().split('T')[0];
 }
@@ -159,6 +222,13 @@ async function runSync() {
   }
 
   console.log(`[tracker] sync complete. ${alerts.length} alerts.`);
+
+  // Write to vault Pinnacle _index.md
+  try {
+    updateVaultPinnacle(snapshot, setterRows, closerRow);
+  } catch (err) {
+    console.error(`[tracker] vault write failed: ${err.message}`);
+  }
 }
 
 if (require.main === module) {
