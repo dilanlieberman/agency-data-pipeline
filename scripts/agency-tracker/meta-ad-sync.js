@@ -15,17 +15,26 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const LEAD_ACTION_TYPES = new Set([
+// Meta returns the same lead under multiple action_type buckets (e.g. `lead` and
+// `onsite_conversion.lead_grouped` both = 1 for the SAME underlying lead). Summing
+// these double-counts. We take MAX across the canonical lead types — matches Meta
+// Ads Manager's "Results" column for lead-gen campaigns.
+const LEAD_ACTION_TYPES = [
   'lead',
   'offsite_conversion.fb_pixel_lead',
   'onsite_conversion.lead_grouped',
   'onsite_conversion.lead',
-]);
+];
 
 const sumActions = (actions, types) =>
   (actions || [])
     .filter((a) => types.has(a.action_type))
     .reduce((s, a) => s + Number(a.value || 0), 0);
+
+const maxAction = (actions, types) => {
+  const map = new Map((actions || []).map((a) => [a.action_type, Number(a.value || 0)]));
+  return types.reduce((m, t) => Math.max(m, map.get(t) || 0), 0);
+};
 
 // Strip "X Pinnacle" / "@Pinnacle" / etc. so the UI shows just "Greenstone", "C&M", etc.
 const stripClient = (name) =>
@@ -92,7 +101,7 @@ function buildRow(account, datePreset, ad) {
   const inlineLinkClicks = Number(ad.inline_link_clicks || 0);
   const actions = ad.actions || [];
 
-  const leads = sumActions(actions, LEAD_ACTION_TYPES);
+  const leads = maxAction(actions, LEAD_ACTION_TYPES);
   const lpv =
     sumActions(actions, new Set(['landing_page_view'])) ||
     sumActions(actions, new Set(['omni_landing_page_view']));
