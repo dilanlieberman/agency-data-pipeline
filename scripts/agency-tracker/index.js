@@ -38,6 +38,7 @@ const {
   computeAgencySnapshot,
 } = require('./lib/metrics');
 const {
+  supabase,
   upsertSetterDaily,
   upsertCloserDaily,
   upsertPpaClientDaily,
@@ -211,7 +212,17 @@ async function runSync() {
 
   const leadBank = computeLeadBankRunway(LEAD_BANK_TOTAL, DAILY_BURN);
 
-  const snapshot = computeAgencySnapshot(setterRows, closerRow, [], [], [], leadBank);
+  // Load retainer_client so MRR snapshot reflects actual seeded clients.
+  let retainerClients = [];
+  try {
+    const { data, error } = await supabase.from('retainer_client').select('*');
+    if (error) throw error;
+    retainerClients = data || [];
+  } catch (err) {
+    console.error(`[tracker] retainer_client load failed: ${err.message}`);
+  }
+
+  const snapshot = computeAgencySnapshot(setterRows, closerRow, [], retainerClients, [], leadBank);
   await upsertAgencyDaily(snapshot);
   console.log(`[tracker] agency snapshot: ${snapshot.total_closes} closes, $${snapshot.total_ppa_revenue} PPA, $${snapshot.total_retainer_mrr} MRR`);
 

@@ -42,7 +42,9 @@ async function aggregateMeta(date) {
   let totalClicks = 0;
 
   for (const row of data || []) {
-    const client = row.account_name || row.client_name || 'unknown';
+    // client_display is the operator-facing name (e.g. "C&M") — meta-ad-sync
+    // already strips the " x Pinnacle" suffix into this column.
+    const client = row.client_display || row.business_name || row.account_name || 'unknown';
     if (!perClient.has(client)) {
       perClient.set(client, {
         spend: 0,
@@ -52,18 +54,25 @@ async function aggregateMeta(date) {
         cpl: null,
         ctr: null,
         cpm: null,
-        freq: row.frequency != null ? Number(row.frequency) : null,
+        freq_weighted_sum: 0,  // weighted by spend for the aggregate
+        freq_weight: 0,
       });
     }
     const c = perClient.get(client);
-    c.spend += Number(row.spend || 0);
+    const sp = Number(row.spend || 0);
+    const lk = Number(row.inline_link_clicks || 0);
+    c.spend += sp;
     c.leads += Number(row.leads || 0);
     c.impressions += Number(row.impressions || 0);
-    c.clicks += Number(row.link_clicks || row.clicks || 0);
-    totalSpend += Number(row.spend || 0);
+    c.clicks += lk;
+    if (row.frequency != null) {
+      c.freq_weighted_sum += Number(row.frequency) * sp;
+      c.freq_weight += sp;
+    }
+    totalSpend += sp;
     totalLeads += Number(row.leads || 0);
     totalImpressions += Number(row.impressions || 0);
-    totalClicks += Number(row.link_clicks || row.clicks || 0);
+    totalClicks += lk;
   }
 
   // Compute derived rates per client.
@@ -74,6 +83,9 @@ async function aggregateMeta(date) {
       c.ctr = +((c.clicks / c.impressions) * 100).toFixed(2);
       c.cpm = +((c.spend / c.impressions) * 1000).toFixed(2);
     }
+    c.freq = c.freq_weight > 0 ? +(c.freq_weighted_sum / c.freq_weight).toFixed(2) : null;
+    delete c.freq_weighted_sum;
+    delete c.freq_weight;
     perClientObj[client] = c;
   }
 
