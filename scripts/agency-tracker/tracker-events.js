@@ -58,6 +58,35 @@ function isUploaded(row) {
 async function emitBreach({ severity, kind, payload }) {
   console.log(`  breach.${severity}/${kind}: ${JSON.stringify(payload)}`);
   if (DRY) return;
+
+  // Dedup: don't emit the same kind+severity again within 12 hours unless
+  // FORCE is set. For missed_upload, also require the streak to have ADVANCED
+  // since the last event — otherwise we're just re-flagging the same gap.
+  const since = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+  const { data: recent } = await supabase
+    .from('tracker_breach_event')
+    .select('id, severity, payload, occurred_at')
+    .eq('kind', kind)
+    .gte('occurred_at', since)
+    .order('occurred_at', { ascending: false })
+    .limit(5);
+
+  if (!FORCE && (recent || []).length > 0) {
+    const last = recent[0];
+    if (kind === 'missed_upload') {
+      const lastStreak = Number(last.payload?.streak || 0);
+      const newStreak = Number(payload?.streak || 0);
+      if (newStreak <= lastStreak && last.severity === severity) {
+        console.log(`    (dedup: same severity '${severity}' + streak ${newStreak} already fired @${last.occurred_at})`);
+        return;
+      }
+    } else if (last.severity === severity) {
+      // Generic same-severity dedup for non-missed-upload kinds.
+      console.log(`    (dedup: ${kind}/${severity} already fired @${last.occurred_at})`);
+      return;
+    }
+  }
+
   const { error } = await supabase.from('tracker_breach_event').insert({
     severity,
     kind,
