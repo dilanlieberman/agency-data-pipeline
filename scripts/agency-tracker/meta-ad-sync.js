@@ -10,6 +10,8 @@ const TOKEN = process.env.META_ACCESS_TOKEN;
 const API_VERSION = (process.env.META_API_VERSION || 'v21.0').trim();
 const BASE = `https://graph.facebook.com/${API_VERSION}`;
 
+const { resolveAdCopy } = require('./lib/ad-copy-variants');
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -146,6 +148,30 @@ function buildRow(account, datePreset, ad) {
     imp_to_lead: impToLead,
     effective_status: 'ACTIVE',
     pulled_at: new Date().toISOString(),
+    // Ad copy preview — looked up by ad_name signature against the canonical
+    // variant table in lib/ad-copy-variants.js. Returns null when the ad name
+    // doesn't match a known concept; the dashboard renders "—" in that case.
+    ...(() => {
+      const copy = resolveAdCopy({
+        ad_name: ad.ad_name || '',
+        business_name: account.business?.name || account.name || '',
+      });
+      return copy
+        ? {
+            ad_copy_concept: copy.concept_key,
+            ad_copy_concept_name: copy.concept_name,
+            ad_copy_primary: copy.primary_text,
+            ad_copy_headline: copy.headline,
+            ad_copy_description: copy.description,
+          }
+        : {
+            ad_copy_concept: null,
+            ad_copy_concept_name: null,
+            ad_copy_primary: null,
+            ad_copy_headline: null,
+            ad_copy_description: null,
+          };
+    })(),
   };
 }
 
