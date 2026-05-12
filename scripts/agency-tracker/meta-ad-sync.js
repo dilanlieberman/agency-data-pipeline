@@ -187,6 +187,88 @@ async function upsertBatch(rows) {
   }
 }
 
+// Fetch creative visual (image/video thumbnail) for a single ad_id.
+// Meta returns thumbnail_url for both image AND video ads (auto-generated still
+// frame for videos). Returns { creative_id, creative_thumbnail_url,
+// creative_image_url, creative_video_id } — all null on failure.
+async function pullAdCreative(adId) {
+  try {
+    const data = await graph(`/${adId}`, {
+      fields: 'creative{id,thumbnail_url,image_url,video_id,effective_object_story_id}',
+    });
+    const c = data.creative || {};
+    return {
+      creative_id: c.id || null,
+      creative_thumbnail_url: c.thumbnail_url || null,
+      creative_image_url: c.image_url || null,
+      creative_video_id: c.video_id || null,
+    };
+  } catch {
+    return {
+      creative_id: null,
+      creative_thumbnail_url: null,
+      creative_image_url: null,
+      creative_video_id: null,
+    };
+  }
+}
+
+// Backfill creative visuals on rows that don't have them yet. Cache in DB so
+// we only hit Meta once per ad_id, refreshing every 6 hours since fbcdn
+// signed URLs can expire. Returns the count of ads we re-fetched creative for.
+const CREATIVE_REFRESH_MS = 6 * 60 * 60 * 1000;
+
+async function fetchMissingCreatives(rows) {
+  if (!rows.length) return 0;
+  const uniqueAdIds = [...new Set(rows.map((r) => r.ad_id))];
+  const refreshCutoff = new Date(Date.now() - CREATIVE_REFRESH_MS).toISOString();
+
+  // Find which ad_ids already have a cached thumbnail that's still fresh.
+  const { data: cached } = await supabase
+    .from('meta_ad_snapshot')
+    .select('ad_id, creative_id, creative_thumbnail_url, creative_image_url, creative_video_id, creative_fetched_at')
+    .in('ad_id', uniqueAdIds)
+    .not('creative_thumbnail_url', 'is', null)
+    .gte('creative_fetched_at', refreshCutoff);
+  const cacheMap = new Map();
+  for (const c of cached || []) cacheMap.set(c.ad_id, c);
+
+  // Apply cached creatives to rows immediately.
+  let cacheHits = 0;
+  let needsFetch = new Set();
+  for (const row of rows) {
+    const hit = cacheMap.get(row.ad_id);
+    if (hit) {
+      row.creative_id = hit.creative_id;
+      row.creative_thumbnail_url = hit.creative_thumbnail_url;
+      row.creative_image_url = hit.creative_image_url;
+      row.creative_video_id = hit.creative_video_id;
+      row.creative_fetched_at = hit.creative_fetched_at;
+      cacheHits++;
+    } else {
+      needsFetch.add(row.ad_id);
+    }
+  }
+
+  // Fetch creatives we don't have yet — one Graph call per ad_id (small N, ~10-40).
+  const fetched = new Map();
+  const fetchedAt = new Date().toISOString();
+  for (const adId of needsFetch) {
+    const c = await pullAdCreative(adId);
+    fetched.set(adId, c);
+  }
+  for (const row of rows) {
+    const f = fetched.get(row.ad_id);
+    if (!f) continue;
+    row.creative_id = f.creative_id;
+    row.creative_thumbnail_url = f.creative_thumbnail_url;
+    row.creative_image_url = f.creative_image_url;
+    row.creative_video_id = f.creative_video_id;
+    row.creative_fetched_at = fetchedAt;
+  }
+  return needsFetch.size;
+}
+
 async function pruneStale(seenIds, succeededAccountIds) {
   // Delete rows for ads no longer ACTIVE — but ONLY for accounts whose pull succeeded.
   // Otherwise a transient Graph API failure on one account would wipe all its rows.
@@ -238,6 +320,15 @@ async function main() {
         console.error(`  ✗ ${acct.name} (${preset}): ${e.message}`);
       }
     }
+  }
+
+  // Backfill creative thumbnails for any ads we don't already have cached.
+  // Most cycles this is a no-op (cache hit on every ad_id).
+  try {
+    const fetched = await fetchMissingCreatives(allRows);
+    if (fetched) console.log(`  · fetched creative for ${fetched} new ads`);
+  } catch (e) {
+    console.error(`  · creative fetch error (non-fatal): ${e.message}`);
   }
 
   await upsertBatch(allRows);
