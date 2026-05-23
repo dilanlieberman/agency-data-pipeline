@@ -240,7 +240,9 @@ async function upsertBatch(rows) {
 async function pullAdCreative(adId) {
   try {
     const data = await graph(`/${adId}`, {
-      fields: 'creative{id,thumbnail_url,image_url,video_id,effective_object_story_id}',
+      // Include `created_time` so the Cohort viz in the Agency Ad Manager can
+      // anchor each ad to its real launch date (Spec §7.2 Tab 4.6).
+      fields: 'created_time,creative{id,thumbnail_url,image_url,video_id,effective_object_story_id}',
     });
     const c = data.creative || {};
     return {
@@ -248,6 +250,7 @@ async function pullAdCreative(adId) {
       creative_thumbnail_url: c.thumbnail_url || null,
       creative_image_url: c.image_url || null,
       creative_video_id: c.video_id || null,
+      ad_created_time: data.created_time || null,
     };
   } catch {
     return {
@@ -255,6 +258,7 @@ async function pullAdCreative(adId) {
       creative_thumbnail_url: null,
       creative_image_url: null,
       creative_video_id: null,
+      ad_created_time: null,
     };
   }
 }
@@ -270,9 +274,10 @@ async function fetchMissingCreatives(rows) {
   const refreshCutoff = new Date(Date.now() - CREATIVE_REFRESH_MS).toISOString();
 
   // Find which ad_ids already have a cached thumbnail that's still fresh.
+  // Also pulls `ad_created_time` so we don't re-fetch it every cycle (it never changes).
   const { data: cached } = await supabase
     .from('meta_ad_snapshot')
-    .select('ad_id, creative_id, creative_thumbnail_url, creative_image_url, creative_video_id, creative_fetched_at')
+    .select('ad_id, creative_id, creative_thumbnail_url, creative_image_url, creative_video_id, creative_fetched_at, ad_created_time')
     .in('ad_id', uniqueAdIds)
     .not('creative_thumbnail_url', 'is', null)
     .gte('creative_fetched_at', refreshCutoff);
@@ -290,6 +295,7 @@ async function fetchMissingCreatives(rows) {
       row.creative_image_url = hit.creative_image_url;
       row.creative_video_id = hit.creative_video_id;
       row.creative_fetched_at = hit.creative_fetched_at;
+      row.ad_created_time = hit.ad_created_time;
       cacheHits++;
     } else {
       needsFetch.add(row.ad_id);
@@ -311,6 +317,7 @@ async function fetchMissingCreatives(rows) {
     row.creative_image_url = f.creative_image_url;
     row.creative_video_id = f.creative_video_id;
     row.creative_fetched_at = fetchedAt;
+    row.ad_created_time = f.ad_created_time;
   }
   return needsFetch.size;
 }
