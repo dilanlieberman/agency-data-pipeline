@@ -351,7 +351,7 @@ async function main() {
   const presetsOk = new Map(); // account_id -> count of successful presets
   let failures = 0;
 
-  for (const preset of ['last_7d', 'maximum']) {
+  for (const preset of ['last_7d', 'last_30d', 'maximum']) {
     for (const acct of accounts) {
       try {
         const ads = await pullAds(acct, preset);
@@ -380,7 +380,7 @@ async function main() {
   await upsertBatch(allRows);
 
   const fullyOk = new Set(
-    [...presetsOk.entries()].filter(([, n]) => n === 2).map(([id]) => id)
+    [...presetsOk.entries()].filter(([, n]) => n === 3).map(([id]) => id)
   );
   const pruned = await pruneStale(seenIds, fullyOk);
 
