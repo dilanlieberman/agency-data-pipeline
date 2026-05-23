@@ -81,4 +81,18 @@ describe('meta-derive', () => {
     expect(out.cpc_link).toBeNull();
     expect(out.hook_rate).toBeNull();
   });
+
+  describe('fixture parity with Edge Function', () => {
+    const fixture = require('./derive-fixture.json');
+    for (const c of fixture.cases) {
+      test(`fixture: ${c.name}`, () => {
+        const out = derive(c.input);
+        for (const [k, v] of Object.entries(c.expected)) {
+          if (v === null) expect(out[k]).toBeNull();
+          else if (typeof v === 'boolean') expect(out[k]).toBe(v);
+          else expect(out[k]).toBeCloseTo(v, 4);
+        }
+      });
+    }
+  });
 });

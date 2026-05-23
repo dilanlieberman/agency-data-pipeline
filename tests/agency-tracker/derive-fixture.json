@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "name": "video_ad_typical",
+      "input": {
+        "spend": 150.50, "impressions": 12000, "reach": 8500, "clicks": 380,
+        "inline_link_clicks": 300, "unique_inline_link_clicks": 270, "leads": 8,
+        "landing_page_views": 220, "video_3s_views": 4200, "video_thruplays": 850,
+        "video_avg_watch_seconds": 7.3
+      },
+      "expected": {
+        "cpm": 12.541666666666666,
+        "cpc_link": 0.5016666666666667,
+        "cpc_unique_link": 0.5574074074074075,
+        "ctr_link": 2.5,
+        "ctr_all": 3.1666666666666665,
+        "unique_ctr": 3.176470588235294,
+        "lpv_to_lead_pct": 3.6363636363636362,
+        "imp_to_lead": 1500,
+        "cpl": 18.8125,
+        "cpa": null,
+        "hook_rate": 35,
+        "hold_rate": 20.238095238095237,
+        "avg_watch_time": 7.3,
+        "low_signal": false
+      }
+    },
+    {
+      "name": "image_ad_low_signal",
+      "input": {
+        "spend": 2.50, "impressions": 150, "reach": 140, "clicks": 5,
+        "inline_link_clicks": 3, "unique_inline_link_clicks": 3, "leads": 0,
+        "landing_page_views": 1, "video_3s_views": 0, "video_thruplays": 0,
+        "video_avg_watch_seconds": 0
+      },
+      "expected": {
+        "cpm": 16.666666666666664,
+        "cpc_link": 0.8333333333333334,
+        "cpc_unique_link": 0.8333333333333334,
+        "ctr_link": 2,
+        "ctr_all": 3.3333333333333335,
+        "unique_ctr": 2.142857142857143,
+        "lpv_to_lead_pct": 0,
+        "imp_to_lead": null,
+        "cpl": null,
+        "cpa": null,
+        "hook_rate": null,
+        "hold_rate": null,
+        "avg_watch_time": null,
+        "low_signal": true
+      }
+    }
+  ]
+}
