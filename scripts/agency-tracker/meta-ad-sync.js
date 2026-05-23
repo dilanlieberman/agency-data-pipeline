@@ -90,7 +90,8 @@ async function pullAds(account, datePreset) {
       'cost_per_unique_inline_link_click,inline_link_clicks,inline_link_click_ctr,' +
       'cost_per_inline_link_click,actions,cost_per_action_type,' +
       // Phase 1 (agency ad manager): clicks for CTR-all, video actions for hook/hold/avg-watch.
-      'clicks,video_avg_time_watched_actions,video_3_sec_watched_actions,video_thruplay_watched_actions',
+      // 3-sec view count comes from the actions array (action_type='video_view') — NOT a top-level field.
+      'clicks,video_avg_time_watched_actions,video_thruplay_watched_actions',
     limit: 500,
     filtering: JSON.stringify([
       { field: 'ad.effective_status', operator: 'IN', value: ['ACTIVE'] },
@@ -126,7 +127,9 @@ function buildRow(account, datePreset, ad) {
   // Action-array fields come back with action_type='video_view' for the relevant
   // event types; sum across them.
   const clicksTotal = Number(ad.clicks || 0);
-  const v3sViews = sumActions(ad.video_3_sec_watched_actions || [], new Set(['video_view']));
+  // 3-sec views: Meta's `video_view` action_type IS the 3-second video play count.
+  // Extract from the existing `actions` array (not a top-level field in Insights API v21).
+  const v3sViews = sumActions(actions, new Set(['video_view']));
   const vThruplays = sumActions(ad.video_thruplay_watched_actions || [], new Set(['video_view']));
   const vAvgWatchSeconds = Number(
     (ad.video_avg_time_watched_actions || []).find((a) => a.action_type === 'video_view')?.value || 0
@@ -425,7 +428,7 @@ async function pullCustomRange({ account, from, to }) {
       'unique_inline_link_clicks,unique_inline_link_click_ctr,' +
       'cost_per_unique_inline_link_click,inline_link_clicks,inline_link_click_ctr,' +
       'cost_per_inline_link_click,actions,cost_per_action_type,' +
-      'clicks,video_avg_time_watched_actions,video_3_sec_watched_actions,video_thruplay_watched_actions',
+      'clicks,video_avg_time_watched_actions,video_thruplay_watched_actions',
     limit: 500,
     filtering: JSON.stringify([
       { field: 'ad.effective_status', operator: 'IN', value: ['ACTIVE'] },
