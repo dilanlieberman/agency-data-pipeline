@@ -11,6 +11,7 @@ const API_VERSION = (process.env.META_API_VERSION || 'v21.0').trim();
 const BASE = `https://graph.facebook.com/${API_VERSION}`;
 
 const { resolveAdCopy } = require('./lib/ad-copy-variants');
+const { derive } = require('./lib/meta-derive');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -87,7 +88,9 @@ async function pullAds(account, datePreset) {
       // Meta UI's "Unique CTR (link click-through rate)" is unique_inline_link_click_ctr.
       'unique_inline_link_clicks,unique_inline_link_click_ctr,' +
       'cost_per_unique_inline_link_click,inline_link_clicks,inline_link_click_ctr,' +
-      'cost_per_inline_link_click,actions,cost_per_action_type',
+      'cost_per_inline_link_click,actions,cost_per_action_type,' +
+      // Phase 1 (agency ad manager): clicks for CTR-all, video actions for hook/hold/avg-watch.
+      'clicks,video_avg_time_watched_actions,video_3_sec_watched_actions,video_thruplay_watched_actions',
     limit: 500,
     filtering: JSON.stringify([
       { field: 'ad.effective_status', operator: 'IN', value: ['ACTIVE'] },
@@ -119,6 +122,30 @@ function buildRow(account, datePreset, ad) {
   const lpvToLead = leads > 0 && lpv > 0 ? +(lpv / leads).toFixed(2) : null;
   const impToLead = leads > 0 ? Math.round(impressions / leads) : null;
 
+  // Phase 1 (agency ad manager) — new raw fields from Meta + derived metrics.
+  // Action-array fields come back with action_type='video_view' for the relevant
+  // event types; sum across them.
+  const clicksTotal = Number(ad.clicks || 0);
+  const v3sViews = sumActions(ad.video_3_sec_watched_actions || [], new Set(['video_view']));
+  const vThruplays = sumActions(ad.video_thruplay_watched_actions || [], new Set(['video_view']));
+  const vAvgWatchSeconds = Number(
+    (ad.video_avg_time_watched_actions || []).find((a) => a.action_type === 'video_view')?.value || 0
+  );
+  // Crude creative_type proxy: any video signal = 'video', else 'image'.
+  // 'carousel' detection deferred to a future pass that joins the creative cache.
+  const creativeType = (v3sViews > 0 || vThruplays > 0 || vAvgWatchSeconds > 0) ? 'video' : 'image';
+
+  const derived = derive({
+    spend, impressions, reach, clicks: clicksTotal,
+    inline_link_clicks: inlineLinkClicks,
+    unique_inline_link_clicks: uniqueLinkClicks,
+    leads, landing_page_views: lpv,
+    video_3s_views: v3sViews,
+    video_thruplays: vThruplays,
+    video_avg_watch_seconds: vAvgWatchSeconds,
+  });
+  const round2 = (n) => (n === null ? null : +n.toFixed(2));
+
   return {
     id: `${ad.ad_id}:${datePreset}`,
     ad_id: ad.ad_id,
@@ -146,6 +173,22 @@ function buildRow(account, datePreset, ad) {
     landing_page_views: lpv,
     lpv_to_lead: lpvToLead,
     imp_to_lead: impToLead,
+    // Phase 1 (agency ad manager) — new columns. Migration:
+    // supabase/migrations/2026-05-23-agency-ad-manager.sql
+    clicks_total: clicksTotal,
+    video_3s_views: v3sViews,
+    video_thruplays: vThruplays,
+    video_avg_watch_seconds: vAvgWatchSeconds || null,
+    creative_type: creativeType,
+    ctr_link: round2(derived.ctr_link),
+    ctr_all: round2(derived.ctr_all),
+    // unique_ctr is already written above from Meta's unique_inline_link_click_ctr — same value as derive().
+    lpv_to_lead_pct: round2(derived.lpv_to_lead_pct),
+    imp_to_lead_v2: derived.imp_to_lead,
+    cpc_link: round2(derived.cpc_link),
+    hook_rate: round2(derived.hook_rate),
+    hold_rate: round2(derived.hold_rate),
+    low_signal: derived.low_signal,
     effective_status: 'ACTIVE',
     pulled_at: new Date().toISOString(),
     // Ad copy preview — looked up by ad_name signature against the canonical
