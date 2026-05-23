@@ -387,7 +387,96 @@ async function main() {
   );
 }
 
-main().catch((e) => {
-  console.error('meta-ad-sync FAIL:', e.message);
-  process.exit(1);
-});
+// ─────────────────────────────────────────────────────────────────────────────
+// Custom date-range mode (Phase 1, agency ad manager)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `node meta-ad-sync.js --account act_X --from YYYY-MM-DD --to YYYY-MM-DD`
+//
+// Pulls Meta Insights for the exact date window, writes rows with
+// date_preset = `custom:<from>:<to>` into meta_ad_snapshot. Skips the pull if
+// a row for this (account, range) already exists with pulled_at < 1h old.
+
+const CUSTOM_RANGE_CACHE_WINDOW_MS = 60 * 60 * 1000;
+
+async function pullCustomRange({ account, from, to }) {
+  const datePreset = `custom:${from}:${to}`;
+  const cutoffIso = new Date(Date.now() - CUSTOM_RANGE_CACHE_WINDOW_MS).toISOString();
+
+  // 1) Cache check
+  const { data: cached, error: selErr } = await supabase
+    .from('meta_ad_snapshot')
+    .select('ad_id, pulled_at')
+    .eq('account_id', account.id)
+    .eq('date_preset', datePreset)
+    .gte('pulled_at', cutoffIso)
+    .limit(1);
+  if (selErr) throw new Error(`cache lookup: ${selErr.message}`);
+  if (cached && cached.length > 0) {
+    return { cached: true, count: 0 };
+  }
+
+  // 2) Pull from Meta — same field list as pullAds(), but with time_range instead of date_preset.
+  const { data: ads } = await graph(`/${account.id}/insights`, {
+    level: 'ad',
+    time_range: JSON.stringify({ since: from, until: to }),
+    fields:
+      'ad_id,ad_name,campaign_name,adset_name,spend,impressions,reach,frequency,cpm,' +
+      'unique_inline_link_clicks,unique_inline_link_click_ctr,' +
+      'cost_per_unique_inline_link_click,inline_link_clicks,inline_link_click_ctr,' +
+      'cost_per_inline_link_click,actions,cost_per_action_type,' +
+      'clicks,video_avg_time_watched_actions,video_3_sec_watched_actions,video_thruplay_watched_actions',
+    limit: 500,
+    filtering: JSON.stringify([
+      { field: 'ad.effective_status', operator: 'IN', value: ['ACTIVE'] },
+    ]),
+  });
+  const rows = (ads || []).map((ad) => buildRow(account, datePreset, ad));
+
+  if (rows.length > 0) {
+    await upsertBatch(rows);
+  }
+  return { cached: false, count: rows.length, pulled_at: new Date().toISOString() };
+}
+
+// CLI mode dispatcher: returns true if we ran custom-range mode (so main() should not run).
+async function maybeRunCustomRangeCli() {
+  const args = process.argv.slice(2);
+  const getFlag = (k) => {
+    const i = args.findIndex((a) => a === k);
+    return i >= 0 ? args[i + 1] : null;
+  };
+  const account = getFlag('--account');
+  const from = getFlag('--from');
+  const to = getFlag('--to');
+  if (!account || !from || !to) return false;
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    throw new Error('--from and --to must be YYYY-MM-DD');
+  }
+
+  // Resolve account from active list.
+  const accounts = await listActiveAccounts();
+  const acct = accounts.find((a) => a.id === account);
+  if (!acct) throw new Error(`account not found / not active: ${account}`);
+
+  const result = await pullCustomRange({ account: acct, from, to });
+  console.log(JSON.stringify(result, null, 2));
+  return true;
+}
+
+module.exports = {
+  pullCustomRange,
+  buildRow,
+  CUSTOM_RANGE_CACHE_WINDOW_MS,
+};
+
+if (require.main === module) {
+  (async () => {
+    const ranCustom = await maybeRunCustomRangeCli();
+    if (!ranCustom) await main();
+  })().catch((e) => {
+    console.error('meta-ad-sync FAIL:', e.message);
+    process.exit(1);
+  });
+}
