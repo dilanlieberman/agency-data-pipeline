@@ -480,10 +480,13 @@ async function main() {
   const acctFlagIdx = args.findIndex((a) => a === '--account');
   const acctFilter = acctFlagIdx >= 0 ? args[acctFlagIdx + 1] : null;
 
-  let accounts = await listAllAccounts();
+  // Pinnacle's own ad account is for acquiring clients, not a client account.
+  const EXCLUDE_ACCOUNTS = new Set(['act_25010776835219106']);
+
+  let accounts = (await listAllAccounts()).filter((a) => !EXCLUDE_ACCOUNTS.has(a.id));
   if (acctFilter) {
     accounts = accounts.filter((a) => a.id === acctFilter);
-    if (!accounts.length) throw new Error(`Account not found: ${acctFilter}`);
+    if (!accounts.length) throw new Error(`Account not found or excluded: ${acctFilter}`);
   }
 
   console.log(`meta-ad-history-backfill: processing ${accounts.length} account(s)`);

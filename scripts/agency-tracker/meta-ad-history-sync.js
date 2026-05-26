@@ -322,7 +322,8 @@ async function main() {
   const sinceStr = isoDate(since);
   const untilStr = isoDate(until);
 
-  const accounts = await listActiveAccounts();
+  const EXCLUDE_ACCOUNTS = new Set(['act_25010776835219106']);
+  const accounts = (await listActiveAccounts()).filter((a) => !EXCLUDE_ACCOUNTS.has(a.id));
   console.log(
     `meta-ad-history-sync: ${accounts.length} active account(s) | window ${sinceStr}..${untilStr}`
   );
