@@ -11,57 +11,19 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
 const { createClient } = require('@supabase/supabase-js');
 
-const TOKEN = process.env.META_ACCESS_TOKEN;
-const API_VERSION = (process.env.META_API_VERSION || 'v21.0').trim();
-const BASE = `https://graph.facebook.com/${API_VERSION}`;
+const {
+  TOKEN,
+  LEAD_ACTION_TYPES,
+  sumActions,
+  maxAction,
+  graph,
+  listActiveAccounts,
+} = require('./lib/meta-helpers');
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const LOOKBACK_DAYS = parseInt(process.env.DAILY_LOOKBACK_DAYS || '30', 10);
-
-const LEAD_ACTION_TYPES = new Set([
-  'lead',
-  'offsite_conversion.fb_pixel_lead',
-  'onsite_conversion.lead_grouped',
-  'onsite_conversion.lead',
-]);
-
-const sumActions = (actions, types) =>
-  (actions || []).filter((a) => types.has(a.action_type)).reduce((s, a) => s + Number(a.value || 0), 0);
-
-const maxAction = (actions, types) => {
-  const map = new Map((actions || []).map((a) => [a.action_type, Number(a.value || 0)]));
-  return [...types].reduce((m, t) => Math.max(m, map.get(t) || 0), 0);
-};
-
-async function graph(path, params = {}) {
-  const url = new URL(`${BASE}${path}`);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  url.searchParams.set('access_token', TOKEN);
-  let lastErr;
-  for (let i = 0; i < 3; i++) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(60000) });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error?.message || `HTTP ${res.status}`);
-      return json;
-    } catch (e) {
-      lastErr = e;
-      if (i < 2) await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
-    }
-  }
-  throw lastErr;
-}
-
-async function listActiveAccounts() {
-  const { data } = await graph('/me/adaccounts', {
-    fields: 'id,account_id,name,account_status,business{name}',
-    limit: 100,
-  });
-  return (data || []).filter(
-    (a) => a.account_status === 1 && !a.name.toLowerCase().includes('dry test'),
-  );
-}
 
 async function pullDailyForAccount(account, sinceDate, untilDate) {
   // Note: drop the effective_status filter so paused-but-historically-spent ads still appear.
