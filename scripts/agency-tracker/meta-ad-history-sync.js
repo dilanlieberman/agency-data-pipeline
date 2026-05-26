@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // meta-ad-history-sync.js
 //
-// Hourly sync that keeps meta_ad_history, meta_ad_history_summary, and
+// Twice-daily sync that keeps meta_ad_history, meta_ad_history_summary, and
 // meta_ad_history_swaps current for ACTIVE accounts only.
 //
 // Thin wrapper around the backfill's pure functions — scopes to the last 7 days
 // of daily data (overlap catches late-arriving Meta data).
 //
-// Cron: hourly, alongside meta-ad-daily-sync.js (different tables, no conflict).
+// Cron: every 12h (0 */12 * * *), alongside meta-ad-daily-sync.js (different tables, no conflict).
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
 const { createClient } = require('@supabase/supabase-js');
