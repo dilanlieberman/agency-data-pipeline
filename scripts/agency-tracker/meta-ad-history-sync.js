@@ -74,7 +74,7 @@ async function pullPlacementBreakdown(account, sinceDate, untilDate) {
     breakdowns: 'publisher_platform,platform_position',
     fields:
       'ad_id,spend,impressions,reach,clicks,inline_link_clicks,' +
-      'actions,video_3s_views,date_start',
+      'actions,date_start',
     limit: 500,
   };
 
