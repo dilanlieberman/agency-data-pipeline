@@ -16,6 +16,9 @@ const {
   graph,
   listActiveAccounts,
   stripClient,
+  sumActions,
+  maxAction,
+  LEAD_ACTION_TYPES,
 } = require('./lib/meta-helpers');
 
 const {
@@ -42,6 +45,9 @@ const INSIGHT_FIELDS =
   'ad_id,ad_name,campaign_name,adset_name,spend,impressions,reach,' +
   'frequency,clicks,inline_link_clicks,unique_inline_link_clicks,actions,' +
   'video_avg_time_watched_actions,video_thruplay_watched_actions,' +
+  'quality_ranking,engagement_rate_ranking,conversion_rate_ranking,' +
+  'video_p25_watched_actions,video_p50_watched_actions,' +
+  'video_p75_watched_actions,video_p95_watched_actions,' +
   'date_start,date_stop';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,6 +60,140 @@ function delay(ms) {
 
 function isoDate(d) {
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Pull placement breakdown for an account within a date window.
+ */
+async function pullPlacementBreakdown(account, sinceDate, untilDate) {
+  const all = [];
+  let params = {
+    level: 'ad',
+    time_range: JSON.stringify({ since: sinceDate, until: untilDate }),
+    time_increment: '1',
+    breakdowns: 'publisher_platform,platform_position',
+    fields:
+      'ad_id,spend,impressions,reach,clicks,inline_link_clicks,' +
+      'actions,video_3s_views,date_start',
+    limit: 500,
+  };
+
+  let pages = 0;
+  let hasMore = true;
+  while (hasMore && pages < PAGE_CAP) {
+    const resp = await graph(`/${account.id}/insights`, params);
+    const data = resp.data || [];
+    for (const raw of data) {
+      const spend = Number(raw.spend || 0);
+      const impressions = Number(raw.impressions || 0);
+      const inlineLinkClicks = Number(raw.inline_link_clicks || 0);
+      const actions = raw.actions || [];
+      const leads = maxAction(actions, LEAD_ACTION_TYPES);
+      const lpv =
+        sumActions(actions, new Set(['landing_page_view'])) ||
+        sumActions(actions, new Set(['omni_landing_page_view']));
+
+      all.push({
+        id: `${raw.ad_id}:${raw.date_start}:${raw.publisher_platform || 'unknown'}:${raw.platform_position || 'unknown'}`,
+        ad_id: raw.ad_id,
+        account_id: account.id,
+        client_display: stripClient(account.name),
+        date_key: raw.date_start,
+        publisher_platform: raw.publisher_platform || 'unknown',
+        platform_position: raw.platform_position || 'unknown',
+        spend: +spend.toFixed(2),
+        impressions,
+        reach: Number(raw.reach || 0),
+        clicks_total: Number(raw.clicks || 0),
+        inline_link_clicks: inlineLinkClicks,
+        leads,
+        landing_page_views: lpv,
+        video_3s_views: sumActions(actions, new Set(['video_view'])),
+        ctr_link: impressions > 0 ? +(inlineLinkClicks / impressions * 100).toFixed(2) : null,
+        cpl: leads > 0 ? +(spend / leads).toFixed(2) : null,
+        cpm: impressions > 0 ? +(spend / impressions * 1000).toFixed(2) : null,
+        pulled_at: new Date().toISOString(),
+      });
+    }
+
+    if (resp.paging?.cursors?.after && resp.paging?.next) {
+      params = { ...params, after: resp.paging.cursors.after };
+      pages++;
+      await delay(DELAY_MS);
+    } else {
+      hasMore = false;
+    }
+  }
+  if (pages >= PAGE_CAP) {
+    console.warn(`  ! ${account.name}: hit ${PAGE_CAP}-page cap on placement breakdown`);
+  }
+  return all;
+}
+
+/**
+ * Pull demographic (age x gender) breakdown for an account within a date window.
+ */
+async function pullDemographicBreakdown(account, sinceDate, untilDate) {
+  const all = [];
+  let params = {
+    level: 'ad',
+    time_range: JSON.stringify({ since: sinceDate, until: untilDate }),
+    time_increment: '1',
+    breakdowns: 'age,gender',
+    fields:
+      'ad_id,spend,impressions,reach,clicks,inline_link_clicks,' +
+      'actions,date_start',
+    limit: 500,
+  };
+
+  let pages = 0;
+  let hasMore = true;
+  while (hasMore && pages < PAGE_CAP) {
+    const resp = await graph(`/${account.id}/insights`, params);
+    const data = resp.data || [];
+    for (const raw of data) {
+      const spend = Number(raw.spend || 0);
+      const impressions = Number(raw.impressions || 0);
+      const inlineLinkClicks = Number(raw.inline_link_clicks || 0);
+      const actions = raw.actions || [];
+      const leads = maxAction(actions, LEAD_ACTION_TYPES);
+      const lpv =
+        sumActions(actions, new Set(['landing_page_view'])) ||
+        sumActions(actions, new Set(['omni_landing_page_view']));
+
+      all.push({
+        id: `${raw.ad_id}:${raw.date_start}:${raw.age || 'unknown'}:${raw.gender || 'unknown'}`,
+        ad_id: raw.ad_id,
+        account_id: account.id,
+        client_display: stripClient(account.name),
+        date_key: raw.date_start,
+        age: raw.age || 'unknown',
+        gender: raw.gender || 'unknown',
+        spend: +spend.toFixed(2),
+        impressions,
+        reach: Number(raw.reach || 0),
+        clicks_total: Number(raw.clicks || 0),
+        inline_link_clicks: inlineLinkClicks,
+        leads,
+        landing_page_views: lpv,
+        ctr_link: impressions > 0 ? +(inlineLinkClicks / impressions * 100).toFixed(2) : null,
+        cpl: leads > 0 ? +(spend / leads).toFixed(2) : null,
+        pulled_at: new Date().toISOString(),
+      });
+    }
+
+    if (resp.paging?.cursors?.after && resp.paging?.next) {
+      params = { ...params, after: resp.paging.cursors.after };
+      pages++;
+      await delay(DELAY_MS);
+    } else {
+      hasMore = false;
+    }
+  }
+  if (pages >= PAGE_CAP) {
+    console.warn(`  ! ${account.name}: hit ${PAGE_CAP}-page cap on demographic breakdown`);
+  }
+  return all;
 }
 
 /**
@@ -301,6 +441,20 @@ async function syncAccount(account, sinceDate, untilDate) {
   }
 
   if (swapCount) console.log(`    ${swapCount} swaps detected`);
+
+  // 6. Pull placement breakdown for the window.
+  const placementRows = await pullPlacementBreakdown(account, sinceDate, untilDate);
+  if (placementRows.length) {
+    await upsertBatch('meta_ad_history_placement', placementRows, 'id');
+    console.log(`    ${placementRows.length} placement rows`);
+  }
+
+  // 7. Pull demographic breakdown for the window.
+  const demoRows = await pullDemographicBreakdown(account, sinceDate, untilDate);
+  if (demoRows.length) {
+    await upsertBatch('meta_ad_history_demographics', demoRows, 'id');
+    console.log(`    ${demoRows.length} demographic rows`);
+  }
 
   return { daily: dailyRows.length, summaries: summaries.length, swaps: swapCount };
 }

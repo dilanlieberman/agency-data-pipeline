@@ -68,6 +68,12 @@ function buildDailyRow(account, raw) {
   )?.value;
   const vAvgWatchSeconds = vAvgWatchRaw != null ? Number(vAvgWatchRaw) : 0;
 
+  // Video retention percentile actions.
+  const videoP25 = sumActions(raw.video_p25_watched_actions || [], new Set(['video_view']));
+  const videoP50 = sumActions(raw.video_p50_watched_actions || [], new Set(['video_view']));
+  const videoP75 = sumActions(raw.video_p75_watched_actions || [], new Set(['video_view']));
+  const videoP95 = sumActions(raw.video_p95_watched_actions || [], new Set(['video_view']));
+
   // Derive all computed metrics via the canonical formula set.
   const derived = derive({
     spend,
@@ -119,6 +125,22 @@ function buildDailyRow(account, raw) {
     avg_watch_time: round2(derived.avg_watch_time),
     imp_to_lead: derived.imp_to_lead,
     low_signal: derived.low_signal,
+    // Quality / relevance rankings (strings from Meta, e.g. "ABOVE_AVERAGE_35").
+    quality_ranking: raw.quality_ranking || null,
+    engagement_rate_ranking: raw.engagement_rate_ranking || null,
+    conversion_rate_ranking: raw.conversion_rate_ranking || null,
+    // Video retention percentiles.
+    video_p25_watched: videoP25,
+    video_p50_watched: videoP50,
+    video_p75_watched: videoP75,
+    video_p95_watched: videoP95,
+    // Attribution window columns (placeholder — multi-window pull added later).
+    leads_default: leads,
+    lpv_default: lpv,
+    leads_7dc: 0,
+    leads_1dc: 0,
+    lpv_7dc: 0,
+    lpv_1dc: 0,
     pulled_at: new Date().toISOString(),
   };
 }
@@ -183,6 +205,34 @@ function computeSummary(dailyRows, creative) {
   const totalV3s = dailyRows.reduce((s, r) => s + Number(r.video_3s_views || 0), 0);
   const totalThruplays = dailyRows.reduce((s, r) => s + Number(r.video_thruplays || 0), 0);
 
+  // Video retention percentiles.
+  const totalVideoP25 = dailyRows.reduce((s, r) => s + Number(r.video_p25_watched || 0), 0);
+  const totalVideoP50 = dailyRows.reduce((s, r) => s + Number(r.video_p50_watched || 0), 0);
+  const totalVideoP75 = dailyRows.reduce((s, r) => s + Number(r.video_p75_watched || 0), 0);
+  const totalVideoP95 = dailyRows.reduce((s, r) => s + Number(r.video_p95_watched || 0), 0);
+
+  // Attribution window totals (placeholder).
+  const totalLeadsDefault = dailyRows.reduce((s, r) => s + Number(r.leads_default || 0), 0);
+  const totalLpvDefault = dailyRows.reduce((s, r) => s + Number(r.lpv_default || 0), 0);
+
+  // Quality/relevance ranking mode (most common non-null value).
+  const mode = (arr) => {
+    const filtered = arr.filter((v) => v != null);
+    if (!filtered.length) return null;
+    const counts = {};
+    for (const v of filtered) counts[v] = (counts[v] || 0) + 1;
+    let best = null;
+    let bestCount = 0;
+    for (const [val, count] of Object.entries(counts)) {
+      if (count > bestCount) { best = val; bestCount = count; }
+    }
+    return best;
+  };
+
+  const avgQualityRanking = mode(dailyRows.map((r) => r.quality_ranking));
+  const avgEngagementRateRanking = mode(dailyRows.map((r) => r.engagement_rate_ranking));
+  const avgConversionRateRanking = mode(dailyRows.map((r) => r.conversion_rate_ranking));
+
   const safeDiv = (num, den) => (den > 0 ? num / den : null);
   const safePct = (num, den) => {
     const r = safeDiv(num, den);
@@ -222,6 +272,27 @@ function computeSummary(dailyRows, creative) {
     active_days: activeDays,
     first_spend_date: firstSpendDate,
     last_spend_date: lastSpendDate,
+    // Video retention percentiles.
+    total_video_p25: totalVideoP25,
+    total_video_p50: totalVideoP50,
+    total_video_p75: totalVideoP75,
+    total_video_p95: totalVideoP95,
+    video_retention_25: totalImpressions > 0 ? (totalVideoP25 / totalImpressions) * 100 : null,
+    video_retention_50: totalImpressions > 0 ? (totalVideoP50 / totalImpressions) * 100 : null,
+    video_retention_75: totalImpressions > 0 ? (totalVideoP75 / totalImpressions) * 100 : null,
+    video_retention_95: totalImpressions > 0 ? (totalVideoP95 / totalImpressions) * 100 : null,
+    // Quality/relevance ranking modes.
+    avg_quality_ranking: avgQualityRanking,
+    avg_engagement_rate_ranking: avgEngagementRateRanking,
+    avg_conversion_rate_ranking: avgConversionRateRanking,
+    // Attribution window totals (placeholder — multi-window pull added later).
+    total_leads_default: totalLeadsDefault,
+    total_lpv_default: totalLpvDefault,
+    total_leads_7dc: 0,
+    total_leads_1dc: 0,
+    total_lpv_7dc: 0,
+    total_lpv_1dc: 0,
+    attribution_gap_pct: null,
     // Creative pass-through from extractCreative result.
     ad_created_time: creative.ad_created_time || null,
     effective_status: creative.effective_status || null,
@@ -427,6 +498,9 @@ async function pullDailyInsights(adId) {
       'ad_id,ad_name,campaign_name,adset_name,spend,impressions,reach,' +
       'frequency,clicks,inline_link_clicks,unique_inline_link_clicks,' +
       'actions,video_thruplay_watched_actions,video_avg_time_watched_actions,' +
+      'quality_ranking,engagement_rate_ranking,conversion_rate_ranking,' +
+      'video_p25_watched_actions,video_p50_watched_actions,' +
+      'video_p75_watched_actions,video_p95_watched_actions,' +
       'date_start,date_stop',
     limit: 500,
   };
@@ -447,6 +521,142 @@ async function pullDailyInsights(adId) {
   }
   if (pages >= PAGE_CAP) {
     console.warn(`  ! ad ${adId}: hit ${PAGE_CAP}-page cap on daily insights`);
+  }
+  return all;
+}
+
+/**
+ * Pull placement breakdown for an entire account (lifetime, daily grain).
+ * Returns array of placement rows ready for Supabase upsert.
+ */
+async function pullPlacementBreakdown(account) {
+  const all = [];
+  let params = {
+    level: 'ad',
+    date_preset: 'maximum',
+    time_increment: 1,
+    breakdowns: 'publisher_platform,platform_position',
+    fields:
+      'ad_id,spend,impressions,reach,clicks,inline_link_clicks,' +
+      'actions,video_3s_views,date_start',
+    limit: 500,
+  };
+
+  let pages = 0;
+  let hasMore = true;
+  while (hasMore && pages < PAGE_CAP) {
+    const resp = await graph(`/${account.id}/insights`, params);
+    const data = resp.data || [];
+    for (const raw of data) {
+      const spend = Number(raw.spend || 0);
+      const impressions = Number(raw.impressions || 0);
+      const inlineLinkClicks = Number(raw.inline_link_clicks || 0);
+      const actions = raw.actions || [];
+      const leads = maxAction(actions, LEAD_ACTION_TYPES);
+      const lpv =
+        sumActions(actions, new Set(['landing_page_view'])) ||
+        sumActions(actions, new Set(['omni_landing_page_view']));
+
+      all.push({
+        id: `${raw.ad_id}:${raw.date_start}:${raw.publisher_platform || 'unknown'}:${raw.platform_position || 'unknown'}`,
+        ad_id: raw.ad_id,
+        account_id: account.id,
+        client_display: stripClient(account.name),
+        date_key: raw.date_start,
+        publisher_platform: raw.publisher_platform || 'unknown',
+        platform_position: raw.platform_position || 'unknown',
+        spend: +spend.toFixed(2),
+        impressions,
+        reach: Number(raw.reach || 0),
+        clicks_total: Number(raw.clicks || 0),
+        inline_link_clicks: inlineLinkClicks,
+        leads,
+        landing_page_views: lpv,
+        video_3s_views: sumActions(actions, new Set(['video_view'])),
+        ctr_link: impressions > 0 ? +(inlineLinkClicks / impressions * 100).toFixed(2) : null,
+        cpl: leads > 0 ? +(spend / leads).toFixed(2) : null,
+        cpm: impressions > 0 ? +(spend / impressions * 1000).toFixed(2) : null,
+        pulled_at: new Date().toISOString(),
+      });
+    }
+
+    if (resp.paging?.cursors?.after) {
+      params = { ...params, after: resp.paging.cursors.after };
+      pages++;
+      await delay(DELAY_MS);
+    } else {
+      hasMore = false;
+    }
+  }
+  if (pages >= PAGE_CAP) {
+    console.warn(`  ! ${account.name}: hit ${PAGE_CAP}-page cap on placement breakdown`);
+  }
+  return all;
+}
+
+/**
+ * Pull demographic (age x gender) breakdown for an entire account (lifetime, daily grain).
+ * Returns array of demographic rows ready for Supabase upsert.
+ */
+async function pullDemographicBreakdown(account) {
+  const all = [];
+  let params = {
+    level: 'ad',
+    date_preset: 'maximum',
+    time_increment: 1,
+    breakdowns: 'age,gender',
+    fields:
+      'ad_id,spend,impressions,reach,clicks,inline_link_clicks,' +
+      'actions,date_start',
+    limit: 500,
+  };
+
+  let pages = 0;
+  let hasMore = true;
+  while (hasMore && pages < PAGE_CAP) {
+    const resp = await graph(`/${account.id}/insights`, params);
+    const data = resp.data || [];
+    for (const raw of data) {
+      const spend = Number(raw.spend || 0);
+      const impressions = Number(raw.impressions || 0);
+      const inlineLinkClicks = Number(raw.inline_link_clicks || 0);
+      const actions = raw.actions || [];
+      const leads = maxAction(actions, LEAD_ACTION_TYPES);
+      const lpv =
+        sumActions(actions, new Set(['landing_page_view'])) ||
+        sumActions(actions, new Set(['omni_landing_page_view']));
+
+      all.push({
+        id: `${raw.ad_id}:${raw.date_start}:${raw.age || 'unknown'}:${raw.gender || 'unknown'}`,
+        ad_id: raw.ad_id,
+        account_id: account.id,
+        client_display: stripClient(account.name),
+        date_key: raw.date_start,
+        age: raw.age || 'unknown',
+        gender: raw.gender || 'unknown',
+        spend: +spend.toFixed(2),
+        impressions,
+        reach: Number(raw.reach || 0),
+        clicks_total: Number(raw.clicks || 0),
+        inline_link_clicks: inlineLinkClicks,
+        leads,
+        landing_page_views: lpv,
+        ctr_link: impressions > 0 ? +(inlineLinkClicks / impressions * 100).toFixed(2) : null,
+        cpl: leads > 0 ? +(spend / leads).toFixed(2) : null,
+        pulled_at: new Date().toISOString(),
+      });
+    }
+
+    if (resp.paging?.cursors?.after) {
+      params = { ...params, after: resp.paging.cursors.after };
+      pages++;
+      await delay(DELAY_MS);
+    } else {
+      hasMore = false;
+    }
+  }
+  if (pages >= PAGE_CAP) {
+    console.warn(`  ! ${account.name}: hit ${PAGE_CAP}-page cap on demographic breakdown`);
   }
   return all;
 }
@@ -573,6 +783,19 @@ async function main() {
             .update({ replaces_ad_id: swap.old_ad_id })
             .eq('ad_id', swap.new_ad_id);
         }
+      }
+      // 8. Pull placement breakdown for the whole account.
+      const placementRows = await pullPlacementBreakdown(account);
+      if (placementRows.length) {
+        await upsertBatch('meta_ad_history_placement', placementRows, 'id');
+        console.log(`    ${placementRows.length} placement rows`);
+      }
+
+      // 9. Pull demographic breakdown for the whole account.
+      const demoRows = await pullDemographicBreakdown(account);
+      if (demoRows.length) {
+        await upsertBatch('meta_ad_history_demographics', demoRows, 'id');
+        console.log(`    ${demoRows.length} demographic rows`);
       }
     } catch (e) {
       failures++;

@@ -48,6 +48,13 @@ describe('buildDailyRow', () => {
       ],
       video_thruplay_watched_actions: [],
       video_avg_time_watched_actions: [],
+      quality_ranking: 'ABOVE_AVERAGE_35',
+      engagement_rate_ranking: 'AVERAGE',
+      conversion_rate_ranking: 'BELOW_AVERAGE_35',
+      video_p25_watched_actions: [{ action_type: 'video_view', value: '500' }],
+      video_p50_watched_actions: [{ action_type: 'video_view', value: '300' }],
+      video_p75_watched_actions: [{ action_type: 'video_view', value: '150' }],
+      video_p95_watched_actions: [{ action_type: 'video_view', value: '50' }],
     };
 
     const row = buildDailyRow(account, raw);
@@ -86,6 +93,25 @@ describe('buildDailyRow', () => {
     expect(row.video_3s_views).toBe(0);
     expect(row.video_thruplays).toBe(0);
     expect(row.video_avg_watch_seconds).toBeNull();
+
+    // Quality / relevance rankings.
+    expect(row.quality_ranking).toBe('ABOVE_AVERAGE_35');
+    expect(row.engagement_rate_ranking).toBe('AVERAGE');
+    expect(row.conversion_rate_ranking).toBe('BELOW_AVERAGE_35');
+
+    // Video retention percentiles.
+    expect(row.video_p25_watched).toBe(500);
+    expect(row.video_p50_watched).toBe(300);
+    expect(row.video_p75_watched).toBe(150);
+    expect(row.video_p95_watched).toBe(50);
+
+    // Attribution window columns (placeholder values).
+    expect(row.leads_default).toBe(3);
+    expect(row.lpv_default).toBe(60);
+    expect(row.leads_7dc).toBe(0);
+    expect(row.leads_1dc).toBe(0);
+    expect(row.lpv_7dc).toBe(0);
+    expect(row.lpv_1dc).toBe(0);
 
     // Must have pulled_at timestamp
     expect(typeof row.pulled_at).toBe('string');
@@ -239,6 +265,12 @@ describe('computeSummary', () => {
         date_key: '2026-04-10',
         spend: 50, impressions: 2000, leads: 2, landing_page_views: 30,
         inline_link_clicks: 40, video_3s_views: 0, video_thruplays: 0,
+        quality_ranking: 'ABOVE_AVERAGE_35',
+        engagement_rate_ranking: 'AVERAGE',
+        conversion_rate_ranking: 'BELOW_AVERAGE_35',
+        video_p25_watched: 400, video_p50_watched: 200,
+        video_p75_watched: 100, video_p95_watched: 30,
+        leads_default: 2, lpv_default: 30,
       },
       {
         ad_id: 'ad_100', ad_name: '4 Collage | Image | I know',
@@ -247,6 +279,12 @@ describe('computeSummary', () => {
         date_key: '2026-04-11',
         spend: 70, impressions: 3000, leads: 3, landing_page_views: 50,
         inline_link_clicks: 60, video_3s_views: 0, video_thruplays: 0,
+        quality_ranking: 'ABOVE_AVERAGE_35',
+        engagement_rate_ranking: 'ABOVE_AVERAGE_35',
+        conversion_rate_ranking: 'BELOW_AVERAGE_35',
+        video_p25_watched: 600, video_p50_watched: 350,
+        video_p75_watched: 180, video_p95_watched: 70,
+        leads_default: 3, lpv_default: 50,
       },
       {
         ad_id: 'ad_100', ad_name: '4 Collage | Image | I know',
@@ -255,6 +293,12 @@ describe('computeSummary', () => {
         date_key: '2026-04-12',
         spend: 0, impressions: 0, leads: 0, landing_page_views: 0,
         inline_link_clicks: 0, video_3s_views: 0, video_thruplays: 0,
+        quality_ranking: null,
+        engagement_rate_ranking: null,
+        conversion_rate_ranking: null,
+        video_p25_watched: 0, video_p50_watched: 0,
+        video_p75_watched: 0, video_p95_watched: 0,
+        leads_default: 0, lpv_default: 0,
       },
     ];
 
@@ -283,6 +327,32 @@ describe('computeSummary', () => {
     // No video data → null hook/hold
     expect(summary.lifetime_hook_rate).toBeNull();
     expect(summary.lifetime_hold_rate).toBeNull();
+
+    // Video retention percentile totals.
+    expect(summary.total_video_p25).toBe(1000);
+    expect(summary.total_video_p50).toBe(550);
+    expect(summary.total_video_p75).toBe(280);
+    expect(summary.total_video_p95).toBe(100);
+
+    // Video retention percentages (as % of impressions).
+    expect(summary.video_retention_25).toBeCloseTo((1000 / 5000) * 100, 2);  // 20%
+    expect(summary.video_retention_50).toBeCloseTo((550 / 5000) * 100, 2);   // 11%
+    expect(summary.video_retention_75).toBeCloseTo((280 / 5000) * 100, 2);   // 5.6%
+    expect(summary.video_retention_95).toBeCloseTo((100 / 5000) * 100, 2);   // 2%
+
+    // Ranking modes (most common non-null value).
+    expect(summary.avg_quality_ranking).toBe('ABOVE_AVERAGE_35');
+    expect(summary.avg_engagement_rate_ranking).toMatch(/AVERAGE|ABOVE_AVERAGE_35/); // 1 each, either is valid mode
+    expect(summary.avg_conversion_rate_ranking).toBe('BELOW_AVERAGE_35');
+
+    // Attribution window totals (placeholder).
+    expect(summary.total_leads_default).toBe(5);
+    expect(summary.total_lpv_default).toBe(80);
+    expect(summary.total_leads_7dc).toBe(0);
+    expect(summary.total_leads_1dc).toBe(0);
+    expect(summary.total_lpv_7dc).toBe(0);
+    expect(summary.total_lpv_1dc).toBe(0);
+    expect(summary.attribution_gap_pct).toBeNull();
   });
 
   test('zero denominators → null lifetime metrics', () => {
@@ -369,12 +439,16 @@ describe('computeSummary', () => {
         campaign_name: 'C', adset_name: 'A',
         account_id: 'a', client_display: 'C', date_key: '2026-04-01',
         spend: 50, impressions: 2000, leads: 2, landing_page_views: 20,
-        inline_link_clicks: 30, video_3s_views: 600, video_thruplays: 120 },
+        inline_link_clicks: 30, video_3s_views: 600, video_thruplays: 120,
+        video_p25_watched: 0, video_p50_watched: 0, video_p75_watched: 0, video_p95_watched: 0,
+        leads_default: 2, lpv_default: 20 },
       { ad_id: 'ad_v', ad_name: 'Video Ad',
         campaign_name: 'C', adset_name: 'A',
         account_id: 'a', client_display: 'C', date_key: '2026-04-02',
         spend: 40, impressions: 1500, leads: 1, landing_page_views: 15,
-        inline_link_clicks: 25, video_3s_views: 400, video_thruplays: 80 },
+        inline_link_clicks: 25, video_3s_views: 400, video_thruplays: 80,
+        video_p25_watched: 0, video_p50_watched: 0, video_p75_watched: 0, video_p95_watched: 0,
+        leads_default: 1, lpv_default: 15 },
     ];
 
     const summary = computeSummary(rows, { creative_type: 'video' });
