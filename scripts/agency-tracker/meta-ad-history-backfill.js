@@ -34,6 +34,31 @@ const supabase = createClient(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * MAX across matching action types for a given per-window action sub-field.
+ * Mirrors the maxAction pattern (avoids double-counting lead types).
+ */
+function getActionWindowValue(actions, types, windowField) {
+  const arr = actions || [];
+  let max = 0;
+  for (const a of arr) {
+    if (!types.has(a.action_type)) continue;
+    const v = Number(a[windowField] || 0);
+    if (v > max) max = v;
+  }
+  return max;
+}
+
+/**
+ * SUM across matching action types for a given per-window action sub-field.
+ * Mirrors the sumActions pattern (used for LPV with omni fallback).
+ */
+function getActionWindowSum(actions, types, windowField) {
+  return (actions || [])
+    .filter((a) => types.has(a.action_type))
+    .reduce((s, a) => s + Number(a[windowField] || 0), 0);
+}
+
+/**
  * Build a daily row for the meta_ad_history table from a Meta Insights API row.
  * @param {Object} account - Account object with id, name, business
  * @param {Object} raw - Raw Meta Insights API row (single day, time_increment=1)
@@ -73,6 +98,32 @@ function buildDailyRow(account, raw) {
   const videoP50 = sumActions(raw.video_p50_watched_actions || [], new Set(['video_view']));
   const videoP75 = sumActions(raw.video_p75_watched_actions || [], new Set(['video_view']));
   const videoP95 = sumActions(raw.video_p95_watched_actions || [], new Set(['video_view']));
+
+  // ── Per-attribution-window leads & LPV ─────────────────────────────────────
+  // Requires action_attribution_windows=['1d_click','7d_click','1d_view'] on the
+  // Insights call so Meta returns per-window sub-fields on each action object.
+  // Note: 7d_click is a superset of 1d_click. 1d_view is separate from clicks.
+  // Default = 7dc1dv = 7d_click + 1d_view (the standard for new offers).
+  const LPV_TYPES_PRIMARY = new Set(['landing_page_view']);
+  const LPV_TYPES_FALLBACK = new Set(['omni_landing_page_view']);
+  const LEAD_TYPES_SET = new Set(LEAD_ACTION_TYPES);
+
+  const leads_7dc = getActionWindowValue(actions, LEAD_TYPES_SET, '7d_click');
+  const leads_1dc = getActionWindowValue(actions, LEAD_TYPES_SET, '1d_click');
+  const leads_view = getActionWindowValue(actions, LEAD_TYPES_SET, '1d_view');
+  // leads_default = 7dc1dv = 7d_click + 1d_view (the standard for new offers).
+  const leads_default = leads_7dc + leads_view;
+
+  const lpv_7dc =
+    getActionWindowSum(actions, LPV_TYPES_PRIMARY, '7d_click') ||
+    getActionWindowSum(actions, LPV_TYPES_FALLBACK, '7d_click');
+  const lpv_1dc =
+    getActionWindowSum(actions, LPV_TYPES_PRIMARY, '1d_click') ||
+    getActionWindowSum(actions, LPV_TYPES_FALLBACK, '1d_click');
+  const lpv_view =
+    getActionWindowSum(actions, LPV_TYPES_PRIMARY, '1d_view') ||
+    getActionWindowSum(actions, LPV_TYPES_FALLBACK, '1d_view');
+  const lpv_default = lpv_7dc + lpv_view;
 
   // Derive all computed metrics via the canonical formula set.
   const derived = derive({
@@ -134,13 +185,15 @@ function buildDailyRow(account, raw) {
     video_p50_watched: videoP50,
     video_p75_watched: videoP75,
     video_p95_watched: videoP95,
-    // Attribution window columns (placeholder — multi-window pull added later).
-    leads_default: leads,
-    lpv_default: lpv,
-    leads_7dc: 0,
-    leads_1dc: 0,
-    lpv_7dc: 0,
-    lpv_1dc: 0,
+    // Attribution window columns (real per-window values from Meta).
+    // leads/landing_page_views above use account default attribution; these
+    // diagnose how much depends on view-through vs click attribution.
+    leads_7dc,
+    leads_1dc,
+    leads_default,
+    lpv_7dc,
+    lpv_1dc,
+    lpv_default,
     pulled_at: new Date().toISOString(),
   };
 }
@@ -211,9 +264,21 @@ function computeSummary(dailyRows, creative) {
   const totalVideoP75 = dailyRows.reduce((s, r) => s + Number(r.video_p75_watched || 0), 0);
   const totalVideoP95 = dailyRows.reduce((s, r) => s + Number(r.video_p95_watched || 0), 0);
 
-  // Attribution window totals (placeholder).
+  // Attribution window totals — aggregate per-window counts across daily rows.
+  const totalLeads7dc = dailyRows.reduce((s, r) => s + Number(r.leads_7dc || 0), 0);
+  const totalLeads1dc = dailyRows.reduce((s, r) => s + Number(r.leads_1dc || 0), 0);
   const totalLeadsDefault = dailyRows.reduce((s, r) => s + Number(r.leads_default || 0), 0);
+  const totalLpv7dc = dailyRows.reduce((s, r) => s + Number(r.lpv_7dc || 0), 0);
+  const totalLpv1dc = dailyRows.reduce((s, r) => s + Number(r.lpv_1dc || 0), 0);
   const totalLpvDefault = dailyRows.reduce((s, r) => s + Number(r.lpv_default || 0), 0);
+
+  // Attribution gap: % of default-window leads that are view-through
+  // (i.e. in 7dc1dv but not in 7d_click alone). High % = leads vanish if
+  // Meta tightens attribution; the "attribution silent killer" diagnostic.
+  const attributionGapPct =
+    totalLeadsDefault > 0
+      ? +(((totalLeadsDefault - totalLeads7dc) / totalLeadsDefault) * 100).toFixed(2)
+      : null;
 
   // Quality/relevance ranking mode (most common non-null value).
   const mode = (arr) => {
@@ -285,14 +350,14 @@ function computeSummary(dailyRows, creative) {
     avg_quality_ranking: avgQualityRanking,
     avg_engagement_rate_ranking: avgEngagementRateRanking,
     avg_conversion_rate_ranking: avgConversionRateRanking,
-    // Attribution window totals (placeholder — multi-window pull added later).
+    // Attribution window totals — real per-window aggregates.
+    total_leads_7dc: totalLeads7dc,
+    total_leads_1dc: totalLeads1dc,
     total_leads_default: totalLeadsDefault,
+    total_lpv_7dc: totalLpv7dc,
+    total_lpv_1dc: totalLpv1dc,
     total_lpv_default: totalLpvDefault,
-    total_leads_7dc: 0,
-    total_leads_1dc: 0,
-    total_lpv_7dc: 0,
-    total_lpv_1dc: 0,
-    attribution_gap_pct: null,
+    attribution_gap_pct: attributionGapPct,
     // Creative pass-through from extractCreative result.
     ad_created_time: creative.ad_created_time || null,
     effective_status: creative.effective_status || null,
@@ -502,6 +567,9 @@ async function pullDailyInsights(adId) {
       'video_p25_watched_actions,video_p50_watched_actions,' +
       'video_p75_watched_actions,video_p95_watched_actions,' +
       'date_start,date_stop',
+    // Per-window action sub-fields for attribution silent-killer diagnostic.
+    // Buildable: leads_default = 7dc + 1dv, leads_7dc, leads_1dc.
+    action_attribution_windows: JSON.stringify(['1d_click', '7d_click', '1d_view']),
     limit: 500,
   };
 

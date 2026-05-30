@@ -224,6 +224,10 @@ async function pullRecentInsights(account, sinceDate, untilDate) {
     time_range: JSON.stringify({ since: sinceDate, until: untilDate }),
     time_increment: '1',
     fields: INSIGHT_FIELDS,
+    // Per-window action sub-fields for attribution silent-killer diagnostic.
+    // Must match the backfill's pullDailyInsights so buildDailyRow can derive
+    // leads_7dc / leads_1dc / leads_default consistently.
+    action_attribution_windows: JSON.stringify(['1d_click', '7d_click', '1d_view']),
     limit: 500,
   };
 

@@ -41,9 +41,27 @@ describe('buildDailyRow', () => {
       inline_link_clicks: '85',
       unique_inline_link_clicks: '78',
       actions: [
-        { action_type: 'lead', value: '3' },
-        { action_type: 'onsite_conversion.lead_grouped', value: '3' },
-        { action_type: 'landing_page_view', value: '60' },
+        {
+          action_type: 'lead',
+          value: '3',
+          '1d_click': '2',
+          '7d_click': '2',
+          '1d_view': '1',
+        },
+        {
+          action_type: 'onsite_conversion.lead_grouped',
+          value: '3',
+          '1d_click': '2',
+          '7d_click': '2',
+          '1d_view': '1',
+        },
+        {
+          action_type: 'landing_page_view',
+          value: '60',
+          '1d_click': '40',
+          '7d_click': '55',
+          '1d_view': '5',
+        },
         { action_type: 'video_view', value: '0' },
       ],
       video_thruplay_watched_actions: [],
@@ -105,13 +123,17 @@ describe('buildDailyRow', () => {
     expect(row.video_p75_watched).toBe(150);
     expect(row.video_p95_watched).toBe(50);
 
-    // Attribution window columns (placeholder values).
+    // Attribution window columns (real per-window values).
+    // Leads: MAX across lead types per window (avoids double counting).
+    // leads_7dc = 2, leads_1dc = 2, leads_view = 1 → leads_default = 7dc + 1dv = 3.
+    expect(row.leads_7dc).toBe(2);
+    expect(row.leads_1dc).toBe(2);
     expect(row.leads_default).toBe(3);
+    // LPV: SUM per window with omni fallback.
+    // lpv_7dc = 55, lpv_1dc = 40, lpv_view = 5 → lpv_default = 7dc + 1dv = 60.
+    expect(row.lpv_7dc).toBe(55);
+    expect(row.lpv_1dc).toBe(40);
     expect(row.lpv_default).toBe(60);
-    expect(row.leads_7dc).toBe(0);
-    expect(row.leads_1dc).toBe(0);
-    expect(row.lpv_7dc).toBe(0);
-    expect(row.lpv_1dc).toBe(0);
 
     // Must have pulled_at timestamp
     expect(typeof row.pulled_at).toBe('string');
@@ -270,7 +292,8 @@ describe('computeSummary', () => {
         conversion_rate_ranking: 'BELOW_AVERAGE_35',
         video_p25_watched: 400, video_p50_watched: 200,
         video_p75_watched: 100, video_p95_watched: 30,
-        leads_default: 2, lpv_default: 30,
+        leads_7dc: 2, leads_1dc: 1, leads_default: 2,
+        lpv_7dc: 25, lpv_1dc: 20, lpv_default: 30,
       },
       {
         ad_id: 'ad_100', ad_name: '4 Collage | Image | I know',
@@ -284,7 +307,8 @@ describe('computeSummary', () => {
         conversion_rate_ranking: 'BELOW_AVERAGE_35',
         video_p25_watched: 600, video_p50_watched: 350,
         video_p75_watched: 180, video_p95_watched: 70,
-        leads_default: 3, lpv_default: 50,
+        leads_7dc: 2, leads_1dc: 1, leads_default: 3,
+        lpv_7dc: 45, lpv_1dc: 35, lpv_default: 50,
       },
       {
         ad_id: 'ad_100', ad_name: '4 Collage | Image | I know',
@@ -298,7 +322,8 @@ describe('computeSummary', () => {
         conversion_rate_ranking: null,
         video_p25_watched: 0, video_p50_watched: 0,
         video_p75_watched: 0, video_p95_watched: 0,
-        leads_default: 0, lpv_default: 0,
+        leads_7dc: 0, leads_1dc: 0, leads_default: 0,
+        lpv_7dc: 0, lpv_1dc: 0, lpv_default: 0,
       },
     ];
 
@@ -345,14 +370,17 @@ describe('computeSummary', () => {
     expect(summary.avg_engagement_rate_ranking).toMatch(/AVERAGE|ABOVE_AVERAGE_35/); // 1 each, either is valid mode
     expect(summary.avg_conversion_rate_ranking).toBe('BELOW_AVERAGE_35');
 
-    // Attribution window totals (placeholder).
+    // Attribution window totals — aggregated per-window across days.
+    // 7dc: 2+2+0=4, 1dc: 1+1+0=2, default: 2+3+0=5
+    expect(summary.total_leads_7dc).toBe(4);
+    expect(summary.total_leads_1dc).toBe(2);
     expect(summary.total_leads_default).toBe(5);
+    // LPV 7dc: 25+45+0=70, 1dc: 20+35+0=55, default: 30+50+0=80
+    expect(summary.total_lpv_7dc).toBe(70);
+    expect(summary.total_lpv_1dc).toBe(55);
     expect(summary.total_lpv_default).toBe(80);
-    expect(summary.total_leads_7dc).toBe(0);
-    expect(summary.total_leads_1dc).toBe(0);
-    expect(summary.total_lpv_7dc).toBe(0);
-    expect(summary.total_lpv_1dc).toBe(0);
-    expect(summary.attribution_gap_pct).toBeNull();
+    // Attribution gap: (default - 7dc) / default × 100 = (5-4)/5 × 100 = 20%
+    expect(summary.attribution_gap_pct).toBeCloseTo(20, 2);
   });
 
   test('zero denominators → null lifetime metrics', () => {
