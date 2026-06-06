@@ -1,14 +1,26 @@
 /**
- * GHL Billing Scraper
+ * GHL Billing Scraper (usage-records API edition)
  *
- * Scrapes wallet/transaction spending from GHL billing page per sub-account.
- * Connects to Chrome debug instance on port 9222 (requires chrome-debug-ghl profile).
+ * Records per-sub-account wallet/usage spend + the agency total into Supabase.
+ *
+ * HOW IT WORKS (rewritten 2026-06-05):
+ *   GHL replaced the old Naive-UI wallet page (which this scraper used to DOM-scrape)
+ *   with a new "Billing Dashboard". Instead of scraping reshuffled HTML, we now attach to
+ *   the authenticated Chrome (CDP), open the billing page, and INTERCEPT the two JSON APIs
+ *   the page itself calls:
+ *     - .../warehouse/v2/location-usage-records/<companyId>?limit=500
+ *         → per-sub-account spend, keyed by month: { locationName, months: { "YYYY-MM": { amount, count } } }
+ *     - .../warehouse/v3/company-usage-records/<companyId>
+ *         → agency totals: { totalSpendAcrossMonths, monthOverMonthChanges: [{ toMonth, toAmount }] }
+ *   This is robust to visual restyles — it only breaks if GHL changes the API itself, in which
+ *   case we throw loudly (we NEVER silently write zeros, which was the old failure mode).
  *
  * Usage:
  *   node scripts/agency-tracker/ghl-billing-scraper.js              # daily: 6 key accounts
  *   node scripts/agency-tracker/ghl-billing-scraper.js --full        # bi-weekly: ALL accounts
  *
  * Requires: Chrome running with --remote-debugging-port=9222 --user-data-dir=$HOME/chrome-debug-ghl
+ *           (logged into the GHL agency).
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
@@ -19,7 +31,11 @@ const { createClient } = require('@supabase/supabase-js');
 const BILLING_URL = 'https://app.gohighlevel.com/settings/billing?tab=wallet_transactions';
 const CDP_URL = 'http://localhost:9222';
 
-// Key sub-accounts to scrape daily
+// JSON endpoints the billing dashboard fires; we intercept their responses.
+const LOCATION_USAGE_RE = /warehouse\/v2\/location-usage-records\//;
+const COMPANY_USAGE_RE = /warehouse\/v3\/company-usage-records\//;
+
+// Key sub-accounts to scrape daily (must match GHL locationName exactly).
 const DAILY_ACCOUNTS = [
   'dilan sub acc 1',
   'dilan sub acc 2',
@@ -38,125 +54,80 @@ async function getPage() {
   const browser = await chromium.connectOverCDP(CDP_URL);
   const contexts = browser.contexts();
   if (!contexts.length) throw new Error('No browser contexts — is Chrome running with debug profile?');
-  const page = contexts[0].pages()[0] || await contexts[0].newPage();
+  // Open a throwaway tab so we don't disturb any existing tab; closed in run()'s finally.
+  const page = await contexts[0].newPage();
   return { browser, page };
 }
 
-async function navigateToBilling(page) {
-  await page.goto(BILLING_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await page.waitForTimeout(5000);
-  // Verify we're on the billing page
-  const url = page.url();
-  if (!url.includes('billing')) throw new Error('Not on billing page — may need to re-login');
-}
+// Loads the billing dashboard and captures the two usage-records JSON payloads.
+// Throws if either fails to arrive (loud failure — never writes zeros silently).
+async function captureUsageRecords(page) {
+  let locationUsage = null;
+  let companyUsage = null;
 
-async function getSubAccountDropdown(page) {
-  // The "Select Sub-Account" dropdown is consistently at index 2
-  const sel = page.locator('.n-base-selection').nth(2);
-  await sel.waitFor({ state: 'visible', timeout: 10000 });
-  return sel;
-}
-
-async function scrapeAccount(page, accountName, dropdown) {
-  // Clear any previous selection
-  try {
-    const clearBtn = dropdown.locator('.n-base-clear').first();
-    if (await clearBtn.isVisible({ timeout: 2000 })) {
-      await clearBtn.click();
-      await page.waitForTimeout(2000);
-    }
-  } catch (e) {
-    // No clear button — first run or already cleared
-  }
-
-  // Click dropdown to open and clear any existing text
-  await dropdown.click();
-  await page.waitForTimeout(500);
-  // Select all + delete to clear the input
-  await page.keyboard.press('Control+a');
-  await page.keyboard.press('Backspace');
-  await page.waitForTimeout(300);
-
-  // Type to search
-  await page.keyboard.type(accountName, { delay: 30 });
-  await page.waitForTimeout(3000);
-
-  // Click the matching option
-  const option = page.locator('.n-base-select-option__content').filter({ hasText: accountName }).first();
-  const exists = await option.isVisible({ timeout: 5000 }).catch(() => false);
-  if (!exists) {
-    console.log(`  [skip] "${accountName}" not found in dropdown`);
-    await page.keyboard.press('Escape');
-    return null;
-  }
-  await option.click();
-  await page.waitForTimeout(5000);
-
-  // Read table data
-  const data = await page.evaluate(() => {
-    const table = document.querySelector('table');
-    if (!table) return null;
-    const rows = Array.from(table.querySelectorAll('tr'));
-
-    // Summary row has total
-    const summaryText = rows[0]?.textContent?.trim() || '';
-    const totalMatch = summaryText.match(/\$([\d,.]+)/);
-    const total = totalMatch ? parseFloat(totalMatch[1].replace(/,/g, '')) : 0;
-
-    // Parse each product row
-    const products = {};
-    for (const row of rows.slice(2)) { // skip header + summary
-      const cells = Array.from(row.querySelectorAll('td, th')).map(c => c.textContent.trim());
-      if (cells.length >= 4) {
-        const name = cells[0].replace(/\s*\$[\d,.]+$/, '').trim();
-        const amount = parseFloat(cells[3]) || 0;
-        if (name && amount > 0) {
-          products[name] = amount;
+  page.on('response', async (resp) => {
+    const url = resp.url();
+    try {
+      if (LOCATION_USAGE_RE.test(url)) {
+        // The page fires this endpoint more than once — an all-accounts call
+        // (limit=500) plus narrower scoped calls. Keep the fullest payload, not
+        // the last one to arrive (which may hold a single account).
+        const json = await resp.json();
+        if (json && Array.isArray(json.data) && (!locationUsage || json.data.length > locationUsage.data.length)) {
+          locationUsage = json;
         }
+      } else if (COMPANY_USAGE_RE.test(url)) {
+        companyUsage = await resp.json();
+      }
+    } catch (e) {
+      // non-JSON / already-consumed body — ignore
+    }
+  });
+
+  const captured = () => locationUsage && Array.isArray(locationUsage.data) && companyUsage;
+
+  // The per-location + company usage calls fire when these sub-views render.
+  // The SPA sometimes serves cached state without re-fetching, so a single pass can
+  // miss them — retry with a fresh navigation (which reliably re-fires the fetches).
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS && !captured(); attempt++) {
+    if (attempt > 1) console.log(`[billing] usage-records not captured — retry ${attempt}/${MAX_ATTEMPTS}`);
+    await page.goto(BILLING_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(6000);
+
+    for (const label of ['Usage Overview', 'By Sub-Account']) {
+      const el = page.locator(`text=/${label.replace(/[- ]/g, '[- ]?')}/i`).first();
+      if (await el.isVisible({ timeout: 4000 }).catch(() => false)) {
+        await el.click().catch(() => {});
+        await page.waitForTimeout(4000);
       }
     }
 
-    return { total, products };
-  });
-
-  return data;
-}
-
-async function getAllSubAccounts(page, dropdown) {
-  // Open dropdown and scroll to collect all account names
-  await dropdown.click();
-  await page.waitForTimeout(1000);
-
-  const accounts = new Set();
-  let prevCount = 0;
-  let scrollAttempts = 0;
-
-  while (scrollAttempts < 20) {
-    const options = await page.evaluate(() => {
-      const items = Array.from(document.querySelectorAll('.n-base-select-option__content'));
-      return items.map(i => i.textContent.trim()).filter(t => !t.startsWith('$') && t.length > 0);
-    });
-    options.forEach(o => accounts.add(o));
-
-    if (accounts.size === prevCount) {
-      scrollAttempts++;
-    } else {
-      scrollAttempts = 0;
+    // Poll for the payloads to arrive this attempt.
+    for (let i = 0; i < 15 && !captured(); i++) {
+      await page.waitForTimeout(1000);
     }
-    prevCount = accounts.size;
-
-    // Scroll the dropdown list
-    await page.evaluate(() => {
-      const list = document.querySelector('.v-vl');
-      if (list) list.scrollTop += 300;
-    });
-    await page.waitForTimeout(300);
   }
 
-  await page.keyboard.press('Escape');
-  await page.waitForTimeout(500);
+  if (!locationUsage || !Array.isArray(locationUsage.data)) {
+    throw new Error('location-usage-records not captured — GHL billing API/UI may have changed');
+  }
+  if (!companyUsage) {
+    throw new Error('company-usage-records not captured — GHL billing API/UI may have changed');
+  }
+  return { locations: locationUsage.data, company: companyUsage };
+}
 
-  return Array.from(accounts).sort();
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+// Agency-wide total for the given month. Prefer the company endpoint's month-over-month
+// figure (matches the old "unfiltered wallet total"); fall back to summing locations.
+function agencyMonthTotal(company, monthKey, locations) {
+  const mom = (company.monthOverMonthChanges || []).find((c) => c.toMonth === monthKey);
+  if (mom && typeof mom.toAmount === 'number') return mom.toAmount;
+  return locations.reduce((sum, L) => sum + ((L.months && L.months[monthKey] && L.months[monthKey].amount) || 0), 0);
 }
 
 async function run() {
@@ -164,60 +135,33 @@ async function run() {
   const today = new Date().toISOString().split('T')[0];
   const month = today.substring(0, 7);
 
-  console.log(`[billing] ${isFullScan ? 'FULL' : 'daily'} scan starting — ${today}`);
+  console.log(`[billing] ${isFullScan ? 'FULL' : 'daily'} scan starting — ${today} (usage-records API)`);
 
-  const { browser, page } = await getPage();
+  const { page } = await getPage();
 
   try {
-    await navigateToBilling(page);
-    console.log('[billing] on billing page');
+    const { locations, company } = await captureUsageRecords(page);
+    console.log(`[billing] captured ${locations.length} sub-accounts from usage-records`);
 
-    const dropdown = await getSubAccountDropdown(page);
-
-    let accountsToScrape;
-    if (isFullScan) {
-      accountsToScrape = await getAllSubAccounts(page, dropdown);
-      console.log(`[billing] full scan: ${accountsToScrape.length} sub-accounts found`);
-    } else {
-      accountsToScrape = DAILY_ACCOUNTS;
-    }
+    const wanted = isFullScan ? locations.map((L) => L.locationName) : DAILY_ACCOUNTS;
 
     const results = [];
-
-    for (const account of accountsToScrape) {
-      console.log(`[billing] scraping: ${account}`);
-      const data = await scrapeAccount(page, account, dropdown);
-      if (data) {
-        console.log(`  total: $${data.total.toFixed(2)}`);
-        results.push({
-          sub_account: account,
-          date: today,
-          month,
-          total_spent: data.total,
-          breakdown: data.products,
-        });
+    for (const name of wanted) {
+      const loc = locations.find((x) => x.locationName === name);
+      if (!loc) {
+        console.log(`  [skip] "${name}" not in usage-records`);
+        continue;
       }
+      const amount = loc.months && loc.months[month] ? loc.months[month].amount : 0;
+      const total = round2(amount);
+      console.log(`[billing] ${name}: $${total.toFixed(2)} (${month})`);
+      results.push({ sub_account: name, date: today, month, total_spent: total, breakdown: {} });
     }
 
-    // Also scrape the agency-wide total (no filter)
-    try {
-      const clearBtn = dropdown.locator('.n-base-clear').first();
-      if (await clearBtn.isVisible({ timeout: 1000 })) {
-        await clearBtn.click();
-        await page.waitForTimeout(5000);
-      }
-    } catch (e) { /* no clear button */ }
+    const agencyTotal = round2(agencyMonthTotal(company, month, locations));
+    console.log(`[billing] agency ${month} total: $${agencyTotal.toFixed(2)}`);
 
-    const agencyTotal = await page.evaluate(() => {
-      const table = document.querySelector('table');
-      if (!table) return 0;
-      const summary = table.querySelector('tr')?.textContent?.trim() || '';
-      const m = summary.match(/\$([\d,.]+)/);
-      return m ? parseFloat(m[1].replace(/,/g, '')) : 0;
-    });
-    console.log(`[billing] agency total: $${agencyTotal.toFixed(2)}`);
-
-    // Write to Supabase
+    // Write per-account spend
     for (const r of results) {
       const { error } = await supabase
         .from('ghl_billing')
@@ -240,7 +184,7 @@ async function run() {
       }, { onConflict: 'date' });
     if (agErr) console.error(`  agency_daily upsert error: ${agErr.message}`);
 
-    console.log(`[billing] done. ${results.length} accounts scraped.`);
+    console.log(`[billing] done. ${results.length} accounts written.`);
 
     // Write full report if --full
     if (isFullScan) {
@@ -248,11 +192,7 @@ async function run() {
         date: today,
         month,
         agency_total: agencyTotal,
-        accounts: results.map(r => ({
-          name: r.sub_account,
-          total: r.total_spent,
-          breakdown: r.breakdown,
-        })),
+        accounts: results.map((r) => ({ name: r.sub_account, total: r.total_spent })),
       };
       const reportPath = require('path').join(__dirname, '../../data/agency-tracker/billing-report.json');
       require('fs').mkdirSync(require('path').dirname(reportPath), { recursive: true });
@@ -260,11 +200,18 @@ async function run() {
       console.log(`[billing] full report written to ${reportPath}`);
     }
   } finally {
-    // Don't close the browser — it's the user's Chrome session
+    // Close our throwaway tab; leave the shared Chrome session running.
+    try { await page.close(); } catch (e) { /* ignore */ }
   }
 }
 
-run().catch(err => {
-  console.error('[billing] fatal:', err.message);
-  process.exit(1);
-});
+// NOTE: we attach to Chrome over CDP and never close the browser (it's the shared,
+// manually-logged-in GHL session). The live CDP websocket keeps Node's event loop
+// alive, so we must exit explicitly — otherwise the process hangs forever and cron
+// runs pile up.
+run()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error('[billing] fatal:', err.message);
+    process.exit(1);
+  });
