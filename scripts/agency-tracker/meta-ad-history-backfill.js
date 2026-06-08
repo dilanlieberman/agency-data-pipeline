@@ -884,6 +884,7 @@ module.exports = {
   computeSummary,
   detectSwaps,
   extractCreative,
+  pullAllAds,
 };
 
 if (require.main === module) {

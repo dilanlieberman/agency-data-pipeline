@@ -25,6 +25,8 @@ const {
   buildDailyRow,
   computeSummary,
   detectSwaps,
+  extractCreative,
+  pullAllAds,
 } = require('./meta-ad-history-backfill');
 
 const supabase = createClient(
@@ -255,8 +257,9 @@ async function pullRecentInsights(account, sinceDate, untilDate) {
 // Summary recomputation
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Creative fields that we preserve from existing summary rows (we don't re-pull
-// ad creative metadata in the hourly sync — the backfill owns that).
+// Creative fields. The sync now fetches live creatives each run (so new ads get
+// their image within 4h); these are the fields we fall back to from the existing
+// summary row when the live creative fetch fails or returns nothing.
 const CREATIVE_FIELDS = [
   'primary_text',
   'headline',
@@ -389,22 +392,53 @@ async function syncAccount(account, sinceDate, untilDate) {
   const affectedAdIds = [...new Set(dailyRows.map((r) => r.ad_id))];
   const affectedCampaigns = [...new Set(dailyRows.map((r) => r.campaign_name))];
 
-  // 4. For each affected ad: read ALL daily rows, read existing summary for
-  //    creative fields, recompute summary, upsert.
+  // Fetch live creatives + effective_status for the account in one call. This is
+  // what lets a newly-launched ad get its image within this 4h sync instead of
+  // waiting for the daily backfill. Best-effort: if it fails (e.g. lost ad
+  // permission) we fall back to whatever creative is already in the summary.
+  const creativeByAd = {};
+  try {
+    const ads = await pullAllAds(account);
+    for (const ad of ads) creativeByAd[ad.id] = extractCreative(ad, account);
+  } catch (e) {
+    console.warn(`    ! creative fetch failed (${stripClient(account.name)}): ${e.message} — keeping existing`);
+  }
+
+  // 4. For each affected ad: read ALL daily rows, resolve creative (prefer the
+  //    freshly-fetched one, preserving any lazy-loaded video URL), recompute
+  //    summary, upsert.
   const summaries = [];
+  let newCreatives = 0;
   for (const adId of affectedAdIds) {
     const allDaily = await readAllDailyRows(adId);
     if (!allDaily.length) continue;
 
     const existingSummary = await readExistingSummary(adId);
-    const creative = extractCreativeFromSummary(existingSummary);
+    const fetched = creativeByAd[adId];
+    let creative;
+    if (fetched) {
+      creative = { ...fetched };
+      // The /ads endpoint doesn't return the lazy-loaded video URL — keep the
+      // one the backfill already resolved rather than nulling it.
+      if (!creative.creative_video_url && existingSummary?.creative_video_url) {
+        creative.creative_video_url = existingSummary.creative_video_url;
+      }
+      if (!existingSummary?.creative_thumbnail_url && creative.creative_thumbnail_url) {
+        newCreatives++;
+      }
+    } else {
+      creative = extractCreativeFromSummary(existingSummary);
+    }
     const summary = computeSummary(allDaily, creative);
     if (summary) summaries.push(summary);
   }
 
   if (summaries.length) {
     await upsertBatch('meta_ad_history_summary', summaries, 'ad_id');
-    console.log(`    ${summaries.length} summaries recomputed`);
+    console.log(
+      `    ${summaries.length} summaries recomputed` +
+        (newCreatives ? ` (${newCreatives} new creatives fetched)` : '')
+    );
   }
 
   // 5. For each affected campaign: re-run swap detection.
