@@ -26,6 +26,8 @@ const API_KEY = process.env.META_SYNC_API_KEY;
 const CORS_ORIGIN = process.env.META_SYNC_CORS_ORIGIN || '*';
 const META_AD_SYNC_PATH = path.resolve(__dirname, '../agency-tracker/meta-ad-sync.js');
 const LOCK_PATH = '/tmp/meta-ad-sync.lock';
+const META_HISTORY_SYNC_PATH = path.resolve(__dirname, '../agency-tracker/meta-ad-history-sync.js');
+const HISTORY_LOCK_PATH = '/tmp/meta-ad-history-sync.lock';
 
 if (!API_KEY) {
   console.error('META_SYNC_API_KEY env var is required — refusing to start');
@@ -62,10 +64,17 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({ ok: true, service: 'meta-sync-webhook' }));
   }
 
-  const isSyncRoute = req.method === 'POST'
-    && (req.url === '/sync-meta-ads' || req.url === '/meta-sync/sync-meta-ads');
+  // Route table: snapshot sync (ad-manager mount/refresh) + history sync
+  // (Historical / Decision Hub mount). Same flock semantics for both.
+  const routes = {
+    '/sync-meta-ads': { script: META_AD_SYNC_PATH, lock: LOCK_PATH },
+    '/meta-sync/sync-meta-ads': { script: META_AD_SYNC_PATH, lock: LOCK_PATH },
+    '/sync-meta-history': { script: META_HISTORY_SYNC_PATH, lock: HISTORY_LOCK_PATH },
+    '/meta-sync/sync-meta-history': { script: META_HISTORY_SYNC_PATH, lock: HISTORY_LOCK_PATH },
+  };
+  const route = req.method === 'POST' ? routes[req.url] : null;
 
-  if (!isSyncRoute) {
+  if (!route) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ error: 'not found' }));
   }
@@ -77,7 +86,7 @@ const server = http.createServer((req, res) => {
 
   const child = spawn(
     '/usr/bin/flock',
-    ['-n', LOCK_PATH, '/usr/bin/node', META_AD_SYNC_PATH],
+    ['-n', route.lock, '/usr/bin/node', route.script],
     { detached: true, stdio: 'ignore' }
   );
   child.on('error', (err) => console.error('spawn error:', err));
