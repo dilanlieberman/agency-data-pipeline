@@ -30,9 +30,9 @@ describe('todayInTz / minusDays', () => {
 });
 
 describe('PULLS', () => {
-  test('exactly the transition preset set, in order', () => {
+  test('exactly the three operator presets, in order', () => {
     expect(mod().PULLS.map((p) => p.key)).toEqual([
-      'today', '7d_plus_today', 'maximum', 'last_7d', 'last_30d',
+      'today', '7d_plus_today', 'maximum',
     ]);
   });
 

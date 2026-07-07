@@ -43,8 +43,8 @@ function minusDays(isoDate, n) {
 
 // The pull set. Operator spec 2026-07-06: Today / 7 Days (7 full prior days +
 // today = 8 calendar days, ONE time_range pull — never last_7d+today summed) /
-// Maximum. last_7d + last_30d remain ONLY until the Lovable UI switches presets
-// (plan Task 8 removes them; pruneStale then deletes their rows).
+// Maximum. Legacy last_7d/last_30d dropped after the Lovable UI cutover
+// (2026-07-06); pruneStale deletes their leftover rows.
 const PULLS = [
   { key: 'today', params: () => ({ date_preset: 'today' }) },
   {
@@ -55,8 +55,6 @@ const PULLS = [
     },
   },
   { key: 'maximum', params: () => ({ date_preset: 'maximum' }) },
-  { key: 'last_7d', params: () => ({ date_preset: 'last_7d' }) },
-  { key: 'last_30d', params: () => ({ date_preset: 'last_30d' }) },
 ];
 
 async function pullAds(account, rangeParams) {
