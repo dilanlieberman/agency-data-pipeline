@@ -24,10 +24,45 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-async function pullAds(account, datePreset) {
+// "Today" in the AD ACCOUNT's timezone — Meta buckets insights by account tz,
+// so this is the only boundary that matches Ads Manager exactly (operator spec
+// 2026-07-06: Today = account-tz midnight -> now).
+function todayInTz(timezoneName) {
+  // en-CA locale formats as YYYY-MM-DD.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezoneName || 'America/New_York',
+  }).format(new Date());
+}
+
+// Exact calendar-day subtraction (DST-proof: pure date math, no ms arithmetic).
+function minusDays(isoDate, n) {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+// The pull set. Operator spec 2026-07-06: Today / 7 Days (7 full prior days +
+// today = 8 calendar days, ONE time_range pull — never last_7d+today summed) /
+// Maximum. last_7d + last_30d remain ONLY until the Lovable UI switches presets
+// (plan Task 8 removes them; pruneStale then deletes their rows).
+const PULLS = [
+  { key: 'today', params: () => ({ date_preset: 'today' }) },
+  {
+    key: '7d_plus_today',
+    params: (acct) => {
+      const t = todayInTz(acct.timezone_name);
+      return { time_range: JSON.stringify({ since: minusDays(t, 7), until: t }) };
+    },
+  },
+  { key: 'maximum', params: () => ({ date_preset: 'maximum' }) },
+  { key: 'last_7d', params: () => ({ date_preset: 'last_7d' }) },
+  { key: 'last_30d', params: () => ({ date_preset: 'last_30d' }) },
+];
+
+async function pullAds(account, rangeParams) {
   const { data } = await graph(`/${account.id}/insights`, {
     level: 'ad',
-    date_preset: datePreset,
+    ...rangeParams, // { date_preset: '...' } OR { time_range: '{"since":..,"until":..}' }
     fields:
       'ad_id,ad_name,campaign_name,adset_name,spend,impressions,reach,frequency,cpm,' +
       // Use unique_inline_link_clicks (link only), NOT unique_clicks (any click).
@@ -103,6 +138,7 @@ function buildRow(account, datePreset, ad) {
     adset_name: ad.adset_name || '',
     account_id: account.id,
     account_name: account.name,
+    account_timezone: account.timezone_name || null,
     client_display: stripClient(account.name),
     business_name: account.business?.name || '',
     date_preset: datePreset,
@@ -320,19 +356,19 @@ async function main() {
   const presetsOk = new Map(); // account_id -> count of successful presets
   let failures = 0;
 
-  for (const preset of ['last_7d', 'last_30d', 'maximum']) {
+  for (const pull of PULLS) {
     for (const acct of accounts) {
       try {
-        const ads = await pullAds(acct, preset);
+        const ads = await pullAds(acct, pull.params(acct));
         for (const ad of ads) {
-          const row = buildRow(acct, preset, ad);
+          const row = buildRow(acct, pull.key, ad);
           allRows.push(row);
           seenIds.add(row.id);
         }
         presetsOk.set(acct.id, (presetsOk.get(acct.id) || 0) + 1);
       } catch (e) {
         failures++;
-        console.error(`  ✗ ${acct.name} (${preset}): ${e.message}`);
+        console.error(`  ✗ ${acct.name} (${pull.key}): ${e.message}`);
       }
     }
   }
@@ -349,7 +385,7 @@ async function main() {
   await upsertBatch(allRows);
 
   const fullyOk = new Set(
-    [...presetsOk.entries()].filter(([, n]) => n === 3).map(([id]) => id)
+    [...presetsOk.entries()].filter(([, n]) => n === PULLS.length).map(([id]) => id)
   );
   const pruned = await pruneStale(seenIds, fullyOk);
 
@@ -441,6 +477,9 @@ module.exports = {
   pullCustomRange,
   buildRow,
   CUSTOM_RANGE_CACHE_WINDOW_MS,
+  todayInTz,
+  minusDays,
+  PULLS,
 };
 
 if (require.main === module) {

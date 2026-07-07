@@ -85,7 +85,7 @@ async function graph(path, params = {}) {
  */
 async function listActiveAccounts() {
   const { data } = await graph('/me/adaccounts', {
-    fields: 'id,account_id,name,account_status,business{name}',
+    fields: 'id,account_id,name,account_status,timezone_name,business{name}',
     limit: 100,
   });
   return (data || []).filter(
@@ -100,7 +100,7 @@ async function listActiveAccounts() {
  */
 async function listAllAccounts() {
   const { data } = await graph('/me/adaccounts', {
-    fields: 'id,account_id,name,account_status,business{name}',
+    fields: 'id,account_id,name,account_status,timezone_name,business{name}',
     limit: 100,
   });
   return (data || []).filter(
