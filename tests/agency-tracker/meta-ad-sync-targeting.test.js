@@ -51,8 +51,31 @@ describe('summarizeTargeting', () => {
   });
 
   test('empty input is US-wide with empty lists', () => {
-    const { locations, summary } = mod().summarizeTargeting([]);
+    const { locations, summary, points } = mod().summarizeTargeting([]);
     expect(locations).toEqual({ states: [], cities: [], other: [] });
     expect(summary).toBe('US-wide');
+    expect(points).toEqual([]);
+  });
+
+  test('lat/lng radius pins become deduped 2dp points for resolve-geo, not raw labels', () => {
+    const { locations, points } = mod().summarizeTargeting([
+      { effective_status: 'ACTIVE', targeting: { geo_locations: {
+        custom_locations: [
+          { latitude: 42.081, longitude: -71.401, radius: 3, distance_unit: 'kilometer' },
+          { latitude: 42.0812, longitude: -71.4009, radius: 5, distance_unit: 'kilometer' },
+          { latitude: 30.31, longitude: -87.43, radius: 8, distance_unit: 'kilometer' },
+        ],
+      } } },
+    ]);
+    expect(points).toEqual([{ lat: 42.08, lng: -71.4 }, { lat: 30.31, lng: -87.43 }]);
+    expect(locations.other).toEqual([]);
+  });
+
+  test('buildTargetingSummary formats states + top cities', () => {
+    expect(mod().buildTargetingSummary({
+      states: ['Massachusetts'],
+      cities: ['Boston', 'Framingham', 'Newton'],
+      other: [],
+    })).toBe('Massachusetts — Boston, Framingham +1');
   });
 });

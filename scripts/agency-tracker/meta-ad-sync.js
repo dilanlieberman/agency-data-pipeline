@@ -204,10 +204,21 @@ function buildRow(account, datePreset, ad) {
 // Summarize adset geo targeting into { locations, summary } for the Client
 // Info page (client_profile table). Only ACTIVE adsets count — paused
 // geographies aren't "where the client is at" anymore.
+function buildTargetingSummary(locations) {
+  const cityPart = locations.cities.length
+    ? ` — ${locations.cities.slice(0, 2).join(', ')}${locations.cities.length > 2 ? ` +${locations.cities.length - 2}` : ''}`
+    : '';
+  const base = locations.states.length
+    ? locations.states.join(', ')
+    : locations.other.join(' · ');
+  return (base + cityPart).trim() || 'US-wide';
+}
+
 function summarizeTargeting(adsets) {
   const states = new Set();
   const cities = new Set();
   const other = new Set();
+  const pointMap = new Map(); // "lat,lng" (2dp) -> {lat,lng}
   for (const as of adsets || []) {
     if (as.effective_status && as.effective_status !== 'ACTIVE') continue;
     const geo = (as.targeting || {}).geo_locations || {};
@@ -218,14 +229,15 @@ function summarizeTargeting(adsets) {
     }
     for (const z of geo.zips || []) if (z.primary_city) cities.add(z.primary_city);
     for (const cl of geo.custom_locations || []) {
-      const label =
-        cl.address_string ||
-        (cl.latitude != null && cl.longitude != null
-          ? `${Number(cl.latitude).toFixed(2)},${Number(cl.longitude).toFixed(2)}`
-          : null);
-      if (label) {
+      if (cl.latitude != null && cl.longitude != null) {
+        const lat = +Number(cl.latitude).toFixed(2);
+        const lng = +Number(cl.longitude).toFixed(2);
+        pointMap.set(`${lat.toFixed(2)},${lng.toFixed(2)}`, { lat, lng });
+        continue; // resolved to city/state later via resolve-geo
+      }
+      if (cl.address_string) {
         const unit = cl.distance_unit === 'kilometer' ? 'km' : 'mi';
-        other.add(cl.radius ? `${label} +${cl.radius}${unit}` : label);
+        other.add(cl.radius ? `${cl.address_string} +${cl.radius}${unit}` : cl.address_string);
       }
     }
   }
@@ -234,39 +246,85 @@ function summarizeTargeting(adsets) {
     cities: [...cities].sort(),
     other: [...other].sort(),
   };
-  const cityPart = locations.cities.length
-    ? ` — ${locations.cities.slice(0, 2).join(', ')}${locations.cities.length > 2 ? ` +${locations.cities.length - 2}` : ''}`
-    : '';
-  const base = locations.states.length
-    ? locations.states.join(', ')
-    : locations.other.join(' · ');
-  const summary = (base + cityPart).trim() || 'US-wide';
-  return { locations, summary };
+  return { locations, summary: buildTargetingSummary(locations), points: [...pointMap.values()] };
+}
+
+// Resolve radius-pin points to { city, state } via the resolve-geo edge
+// function (Mapbox lives only in Supabase secrets; results cached in
+// geo_cache). Returns { "lat,lng": {city,state}|null }.
+async function resolvePoints(points) {
+  if (!points.length) return {};
+  const res = await fetch(
+    `${process.env.SUPABASE_URL}/functions/v1/resolve-geo`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ points: points.slice(0, 100) }),
+    }
+  );
+  if (!res.ok) throw new Error(`resolve-geo ${res.status}`);
+  return (await res.json()).results || {};
 }
 
 // Refresh machine-owned fields on client_profile for every active account.
 // NEVER writes owner_name / service — those are operator-edited in the UI.
+// Agency's own account — never a "client" (same exclusion as the Decision Hub).
+const AGENCY_ACCOUNT_ID = 'act_25010776835219106';
+
 async function syncClientProfiles(accounts) {
-  const rows = [];
+  const pending = [];
   for (const acct of accounts) {
+    if (acct.id === AGENCY_ACCOUNT_ID) continue;
+    // Skip junk accounts with no real name (e.g. an invisible-character name).
+    if (!/[A-Za-z0-9]/.test(acct.name || '')) continue;
     try {
       const { data: adsets } = await graph(`/${acct.id}/adsets`, {
         fields: 'effective_status,targeting{geo_locations}',
         limit: 100,
       });
-      const { locations, summary } = summarizeTargeting(adsets || []);
-      rows.push({
-        account_id: acct.id,
-        business_name: acct.business?.name || acct.name,
-        client_display: stripClient(acct.name),
-        targeting_locations: locations,
-        targeting_summary: summary,
-        targeting_updated_at: new Date().toISOString(),
-      });
+      pending.push({ acct, ...summarizeTargeting(adsets || []) });
     } catch (e) {
       console.error(`  ✗ targeting ${acct.name}: ${e.message}`);
     }
   }
+
+  // One resolve-geo call for all radius pins across all accounts.
+  let resolved = {};
+  const allPoints = [...new Map(
+    pending.flatMap((p) => p.points).map((pt) => [`${pt.lat.toFixed(2)},${pt.lng.toFixed(2)}`, pt])
+  ).values()];
+  try {
+    resolved = await resolvePoints(allPoints);
+  } catch (e) {
+    console.error(`  · resolve-geo error (non-fatal, raw coords kept): ${e.message}`);
+  }
+
+  const rows = pending.map(({ acct, locations, points }) => {
+    for (const pt of points) {
+      const hit = resolved[`${pt.lat.toFixed(2)},${pt.lng.toFixed(2)}`];
+      if (hit) {
+        if (hit.state) locations.states.push(hit.state);
+        if (hit.city) locations.cities.push(hit.city);
+      } else {
+        locations.other.push(`${pt.lat.toFixed(2)},${pt.lng.toFixed(2)}`);
+      }
+    }
+    locations.states = [...new Set(locations.states)].sort();
+    locations.cities = [...new Set(locations.cities)].sort();
+    locations.other = [...new Set(locations.other)].sort();
+    return {
+      account_id: acct.id,
+      business_name: acct.business?.name || acct.name,
+      client_display: stripClient(acct.name),
+      targeting_locations: locations,
+      targeting_summary: buildTargetingSummary(locations),
+      targeting_updated_at: new Date().toISOString(),
+    };
+  });
+
   if (rows.length) {
     const { error } = await supabase
       .from('client_profile')
@@ -562,6 +620,7 @@ module.exports = {
   minusDays,
   PULLS,
   summarizeTargeting,
+  buildTargetingSummary,
 };
 
 if (require.main === module) {
