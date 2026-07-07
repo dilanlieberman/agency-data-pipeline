@@ -201,6 +201,81 @@ function buildRow(account, datePreset, ad) {
   };
 }
 
+// Summarize adset geo targeting into { locations, summary } for the Client
+// Info page (client_profile table). Only ACTIVE adsets count — paused
+// geographies aren't "where the client is at" anymore.
+function summarizeTargeting(adsets) {
+  const states = new Set();
+  const cities = new Set();
+  const other = new Set();
+  for (const as of adsets || []) {
+    if (as.effective_status && as.effective_status !== 'ACTIVE') continue;
+    const geo = (as.targeting || {}).geo_locations || {};
+    for (const r of geo.regions || []) if (r.name) states.add(r.name);
+    for (const c of geo.cities || []) {
+      if (c.name) cities.add(c.name);
+      if (c.region) states.add(c.region);
+    }
+    for (const z of geo.zips || []) if (z.primary_city) cities.add(z.primary_city);
+    for (const cl of geo.custom_locations || []) {
+      const label =
+        cl.address_string ||
+        (cl.latitude != null && cl.longitude != null
+          ? `${Number(cl.latitude).toFixed(2)},${Number(cl.longitude).toFixed(2)}`
+          : null);
+      if (label) {
+        const unit = cl.distance_unit === 'kilometer' ? 'km' : 'mi';
+        other.add(cl.radius ? `${label} +${cl.radius}${unit}` : label);
+      }
+    }
+  }
+  const locations = {
+    states: [...states].sort(),
+    cities: [...cities].sort(),
+    other: [...other].sort(),
+  };
+  const cityPart = locations.cities.length
+    ? ` — ${locations.cities.slice(0, 2).join(', ')}${locations.cities.length > 2 ? ` +${locations.cities.length - 2}` : ''}`
+    : '';
+  const base = locations.states.length
+    ? locations.states.join(', ')
+    : locations.other.join(' · ');
+  const summary = (base + cityPart).trim() || 'US-wide';
+  return { locations, summary };
+}
+
+// Refresh machine-owned fields on client_profile for every active account.
+// NEVER writes owner_name / service — those are operator-edited in the UI.
+async function syncClientProfiles(accounts) {
+  const rows = [];
+  for (const acct of accounts) {
+    try {
+      const { data: adsets } = await graph(`/${acct.id}/adsets`, {
+        fields: 'effective_status,targeting{geo_locations}',
+        limit: 100,
+      });
+      const { locations, summary } = summarizeTargeting(adsets || []);
+      rows.push({
+        account_id: acct.id,
+        business_name: acct.business?.name || acct.name,
+        client_display: stripClient(acct.name),
+        targeting_locations: locations,
+        targeting_summary: summary,
+        targeting_updated_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.error(`  ✗ targeting ${acct.name}: ${e.message}`);
+    }
+  }
+  if (rows.length) {
+    const { error } = await supabase
+      .from('client_profile')
+      .upsert(rows, { onConflict: 'account_id' });
+    if (error) throw new Error(`client_profile upsert: ${error.message}`);
+  }
+  return rows.length;
+}
+
 async function upsertBatch(rows) {
   // Chunk to avoid request size limits.
   const CHUNK = 200;
@@ -382,6 +457,14 @@ async function main() {
 
   await upsertBatch(allRows);
 
+  // Client Info page data — non-fatal if Meta hiccups on an account.
+  let profiles = 0;
+  try {
+    profiles = await syncClientProfiles(accounts);
+  } catch (e) {
+    console.error(`  · client_profile sync error (non-fatal): ${e.message}`);
+  }
+
   const fullyOk = new Set(
     [...presetsOk.entries()].filter(([, n]) => n === PULLS.length).map(([id]) => id)
   );
@@ -389,7 +472,7 @@ async function main() {
 
   const dt = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(
-    `meta-ad-sync ✓ ${allRows.length} rows | ${pruned} stale removed | ${accounts.length} accts (${failures} fail) | ${dt}s`
+    `meta-ad-sync ✓ ${allRows.length} rows | ${pruned} stale removed | ${profiles} profiles | ${accounts.length} accts (${failures} fail) | ${dt}s`
   );
 }
 
@@ -478,6 +561,7 @@ module.exports = {
   todayInTz,
   minusDays,
   PULLS,
+  summarizeTargeting,
 };
 
 if (require.main === module) {
